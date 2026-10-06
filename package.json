@@ -1,0 +1,25 @@
+{
+  "name": "glados-checkin",
+  "version": "1.0.0",
+  "description": "GLaDOS 自动签到脚本 —— 青龙面板 / 通用 Node 环境，零依赖",
+  "main": "src/index.js",
+  "bin": {
+    "glados-checkin": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "glados",
+    "checkin",
+    "qinglong",
+    "签到",
+    "青龙"
+  ],
+  "license": "MIT",
+  "private": true
+}
