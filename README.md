@@ -27,7 +27,9 @@ please checkin via https://glados.cloud
 
 ---
 
-## 二、获取 Cookie
+## 二、获取 Cookie 与 User-Agent
+
+### 1. 获取 Cookie
 
 1. 浏览器打开 <https://glados.cloud> 并登录
 2. 进入 **签到页面**（Console → Checkin）
@@ -36,16 +38,79 @@ please checkin via https://glados.cloud
 5. 在请求列表里找到名为 **`checkin`** 的请求，点开
 6. 在 **Request Headers** 里找到 **`Cookie`** 字段，**整段复制**
 
-格式应当形如：
+**⚠️ 必须包含 `gld:sess` 与 `gld:sess.sig`**
+
+2026-09 起站点把会话拆成了两个新字段，**两个都要有，缺一个就签不上**：
+
+| 字段 | 说明 |
+| --- | --- |
+| `gld:sess` | 会话 ID |
+| `gld:sess.sig` | 会话签名（漏掉它是最常见的复制错误） |
+
+旧的 `koa:sess` / `koa:sess.sig` **即使没过期，调新版 API 也会返回 `没有权限`（`code=-2`）**。
+好在完整 Cookie 里新旧字段是**同时下发**的，所以**整段复制即可，不要手工挑字段**。
+
+复制后请确认值里同时出现 `gld:sess=` 和 `gld:sess.sig=`。形如：
 
 ```
-koa:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; koa:sess.sig=abcdef123456
+gld:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; gld:sess.sig=abcdef123456; koa:sess=...; koa:sess.sig=...
 ```
 
 > **格式要点**：分号后**必须有一个空格**，值两边**不要加引号**。
-> 脚本对格式做了较强的容错（支持 JSON、裸 JWT、`Cookie:` 前缀等），但保持标准格式最稳妥。
+> 多余字段（`theme`、`_ga` 之类）不影响使用。脚本也做了较强容错（支持 JSON、裸 JWT、`Cookie:` 前缀等），但保持标准格式最稳妥。
 
-**同时请记下你当前浏览器的 User-Agent** —— 在同一个 `checkin` 请求的 Request Headers 里能找到 `User-Agent` 字段。下一步要用。
+### 2. 获取 User-Agent（重要）
+
+GLaDOS 从 2026-09 起会校验**登录设备**：服务端从 `User-Agent` 解析出平台，与登录时的平台比对，不一致就返回 `code=4`（`Automated check-in detected`）。
+
+**关键：只比对「平台」，不比对完整字符串。** 平台只有这几种取值：
+
+```
+Windows / macOS / Linux / Android / iOS / Bot / Other
+```
+
+所以 Chrome 版本号、小版本差异都**不影响** —— 只有平台必须对上。
+
+**怎么拿**（任选一种）：
+
+- **最简单**：用你**平时登录 GLaDOS 的那个浏览器**打开 `glados.cloud`，按 `F12` → **Console**，输入 `navigator.userAgent` 回车，复制输出的完整字符串
+- 地址栏输入 `chrome://version`，复制「用户代理」那一整行
+- 在 `checkin` 请求的 Request Headers 里复制 `User-Agent`
+
+> 想确认自己登录用的是哪个平台：登录状态下访问 `https://glados.cloud/api/user/sessions`，看 `device` 字段。
+
+**要不要配？**
+
+| 你的登录环境 | 是否需要配置 |
+| --- | --- |
+| Windows 电脑的 Chrome / Edge | **不用配**，脚本默认值就是 Windows Chrome |
+| macOS / Linux / 手机 / iPad | **必须配**，否则会被判为自动签到 |
+
+**怎么填**：
+
+| 场景 | 写法 |
+| --- | --- |
+| 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`，值**直接粘贴**（输入框里不用加引号） |
+| 本地 `.env` | **必须加引号**（UA 含空格和括号） |
+| shell 临时运行 | **必须加引号**，否则会被 shell 截断 |
+
+```bash
+# 本地 .env
+GLADOS_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# shell 临时运行
+GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index.js
+```
+
+**配错了怎么看出来**：脚本失败时会打印服务端给的对比 ——
+
+```
+设备校验失败 (device-mismatch)：登录设备 Windows，当前请求 macOS
+```
+
+`loginDevice` 是你登录时的平台（**照它改**），`currentDevice` 是这次请求被识别成的平台；**`currentDevice` 为空**说明 UA 根本没带上。
+
+> ⚠️ 设备校验不通过时，`status` / `points` 接口**是正常的**，所以很容易误判成 Cookie 过期。
 
 ---
 
@@ -57,8 +122,8 @@ koa:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; koa:sess.sig=abcdef123456
 
 | 变量名 | 值 | 必填 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | 上一步复制的 Cookie | ✅ |
-| `GLADOS_USER_AGENT` | 与登录时相同的浏览器 UA | 强烈建议 |
+| `GLADOS_COOKIE` | 上一步复制的完整 Cookie（须含 `gld:sess`） | ✅ |
+| `GLADOS_USER_AGENT` | 登录浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
 
 多账号：**多次添加** `GLADOS_COOKIE` 变量，或用 `&` / 换行在单个变量里分隔。
 
@@ -150,11 +215,14 @@ node src/index.js
 签到 token 失效了。GLaDOS 又改了 API 值，把 `GLADOS_CHECKIN_TOKEN` 设成日志里提示的那个域名。
 
 **Q：日志显示 `设备校验失败 (device-mismatch)`？**
-这是 2026-09 新增的设备校验。把 `GLADOS_USER_AGENT` 改成你**获取 Cookie 时那个浏览器**的完整 UA，平台必须一致（在 Windows 登录就用 Windows UA，别用 Android 或 Linux 的）。
-注意此时 `status` / `points` 接口是正常的，别误以为是 Cookie 问题。
+这是 2026-09 新增的设备校验。脚本会同时打印服务端返回的 `loginDevice`（登录平台）与 `currentDevice`（本次请求被识别成的平台）。
+把 `GLADOS_USER_AGENT` 改成 `loginDevice` 对应的平台即可 —— **只比对平台，版本号无所谓**。
+注意此时 `status` / `points` 接口是正常的，别误以为是 Cookie 问题。详见第二节 2。
 
 **Q：`Cookie 失效或无权限 (code=-2)`？**
-Cookie 真的过期了，重新走第二步获取。GLaDOS 的 Cookie 大约 30 天失效。
+两种可能：
+1. **复制漏了字段** —— 确认 Cookie 里同时有 `gld:sess=` 和 `gld:sess.sig=`。2026-09 起新增的这两个字段缺一不可，只有旧的 `koa:*` 会一直报这个错；
+2. **Cookie 过期** —— 重新走第二步获取。GLaDOS 的 Cookie 大约 30 天失效。
 
 **Q：`今日已签到` 算失败吗？**
 不算。这表示今天已经签到过了，脚本会返回退出码 `0`。

@@ -191,11 +191,22 @@ async function main() {
 
   if (config.cookies.length === 0) {
     log('❌ 未配置 GLADOS_COOKIE，退出');
-    log('   请在青龙面板「环境变量」中添加，格式: koa:sess=xxx; koa:sess.sig=yyy');
+    log('   请在青龙面板「环境变量」中添加，整段复制签到页的 Cookie');
+    log('   须同时包含 gld:sess 与 gld:sess.sig 两个字段');
     return 1;
   }
 
   log('📋 账号数: ' + config.cookies.length + ' | 域名: ' + config.domains.join(', '));
+
+  // 2026-09 起会话字段改为 gld:sess / gld:sess.sig，只有旧的 koa:* 会一直返回 code=-2。
+  // 这里只提示、不拦截 —— 万一站点回退到旧字段，脚本仍能正常工作。
+  const missingGld = config.cookies.filter((c) => !c.includes('gld:sess'));
+  if (missingGld.length > 0) {
+    log('⚠️ 有 ' + missingGld.length + '/' + config.cookies.length + ' 个 Cookie 里没有 gld:sess');
+    log('   GLaDOS 2026-09 起改用 gld:sess + gld:sess.sig，只有旧的 koa:sess 会返回「没有权限」(code=-2)');
+    log('   请在签到页 Network 里【整段复制】Cookie，确认同时含这两个字段');
+  }
+
   if (config.exchangePlan) {
     const p = EXCHANGE_PLANS[config.exchangePlan];
     log('🎁 自动兑换已启用: ' + p.points + '分 → ' + p.days + '天');
