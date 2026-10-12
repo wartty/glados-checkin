@@ -188,9 +188,6 @@ async function main() {
   const config = loadConfig(process.env);
 
   log('🚀 GLaDOS 签到启动');
-  if (config.envFileUsed) {
-    log('📄 从 .env 读取配置: ' + config.envFileUsed);
-  }
 
   if (config.cookies.length === 0) {
     log('❌ 读不到 Cookie —— 环境变量 ' + config.cookieEnvName + ' 不存在或为空');
@@ -209,23 +206,17 @@ async function main() {
       log('     值长度为 0 说明变量建了但值没保存进去');
     } else {
       log('   ⚠️ 没有任何变量名包含 GLADOS / COOKIE / USER_AGENT');
-      log('');
-      log('   👉 最常见原因：定时任务的命令写成了 node <绝对路径>。');
-      log('      青龙只有在命令【以脚本路径开头】时才会注入环境变量 ——');
-      log('      node xxx.js 会绕过它的 Node 预加载，面板变量就一个都读不到。');
-      log('');
-      log('      请把「定时任务」的命令改成：');
-      log('         task glados-checkin/src/index.js');
-      log('      （路径相对 /ql/scripts，按你实际的目录名调整）');
-      log('');
-      log('   下面是当前全部变量名，可用来确认变量是否真的在环境里：');
+      log('   下面是当前全部变量名，请在列表中查找你的变量：');
       log('');
       for (const name of diag.names) {
         log('     ' + JSON.stringify(name));
       }
       log('');
-      log('   若改用 task 后仍读不到，可退而用 .env 文件（见 README 第三节方案 B）：');
-      log('     GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy"');
+      log('   若列表中找不到，请检查：');
+      log('   ① 该变量在青龙「环境变量」里是否处于【启用】状态');
+      log('   ② 变量名是否符合青龙规范：只能含字母/数字/下划线，且以字母或下划线开头');
+      log('      （不符合规范的名字会被青龙静默丢弃，但面板里照常显示）');
+      log('   ③ 变量是否加在了当前这个青龙实例上');
     }
     return 1;
   }

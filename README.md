@@ -91,13 +91,9 @@ Windows / macOS / Linux / Android / iOS / Bot / Other
 | 场景 | 写法 |
 | --- | --- |
 | 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`，值**直接粘贴**（输入框里不用加引号） |
-| 本地 `.env` | **必须加引号**（UA 含空格和括号） |
 | shell 临时运行 | **必须加引号**，否则会被 shell 截断 |
 
 ```bash
-# 本地 .env
-GLADOS_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
 # shell 临时运行
 GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index.js
 ```
@@ -116,9 +112,7 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 ## 三、青龙面板部署
 
-### 1. 配置（二选一）
-
-**方案 A：环境变量**（常规做法）
+### 1. 添加环境变量
 
 青龙面板 → **环境变量** → **新建变量**：
 
@@ -129,19 +123,8 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 多账号：**多次添加** `GLADOS_COOKIE` 变量，或用 `&` / 换行在单个变量里分隔。
 
-> 值**直接粘贴，不要带引号** —— 青龙的输入框不会像 shell 那样剥引号，带上引号会变成值的一部分（脚本虽然会自动剥成对引号，但没必要绕这一圈）。
-
-**方案 B：`.env` 文件**（环境变量始终读不到时的可靠替代）
-
-青龙面板 → **脚本管理** → 在脚本目录下新建 `.env` 文件：
-
-```dotenv
-GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy"
-GLADOS_USER_AGENT="你的UA"
-```
-
-脚本会自动读取**脚本目录**或**当前工作目录**下的 `.env`；同时存在时环境变量优先。
-如果青龙无论如何都不把变量传进脚本（见第七节第一条），用这个方案可以**完全绕开它的注入机制**。
+> **值直接粘贴，不要带引号** —— 青龙的输入框不会像 shell 那样剥引号，带上引号会变成值的一部分。
+> **变量名需符合青龙规范**：只能含字母、数字、下划线，且以字母或下划线开头 —— 不符合的名字会被青龙静默丢弃。
 
 ### 2. 上传脚本
 
@@ -159,41 +142,15 @@ GLADOS_USER_AGENT="你的UA"
 
 > 定时规则是 **6 位 cron**（秒 分 时 日 月 周），`0 30 9 * * *` 表示每天 09:30:00。
 > 建议**避开整点**，能减少被限流的概率。
-
-#### ⚠️ 命令必须用 `task <脚本路径>.js` 的形式
-
-这是**最容易踩的坑**，用错了会导致面板里的环境变量一个都读不到。
-
-| 写法 | 结果 |
-| --- | --- |
-| ✅ `task glados-checkin/src/index.js` | 正常，环境变量可用 |
-| ❌ `node /ql/scripts/glados-checkin/src/index.js` | **读不到任何面板环境变量** |
-
-原因在青龙的 `otask.sh`：它**只以第一个参数是不是脚本路径**来判断如何注入环境变量 ——
-
-```bash
-if [[ $1 == *.js ]] || [[ $1 == *.ts ]] || [[ $1 == *.mjs ]]; then
-  export NODE_OPTIONS="-r $file_preload_js $NODE_OPTIONS"   # 挂上 Node 预加载
-```
-
-写 `task xxx.js` 时 `$1` 就是脚本路径，Node 预加载被挂上，面板变量注入成功；
-写 `node xxx.js` 时 `$1` 是 `"node"`，预加载不会挂，于是 `process.env` 里只剩容器自带的那点变量。
-
-- 路径是**相对 `/ql/scripts`** 的（青龙官方文档：「若放入子目录，后续命令也要包含该相对路径」）。
-- 面板会自动在最前面补 `task`，但**别依赖这一点**，自己写全更清楚。
+>
+> `task` 是青龙执行脚本的标准写法；路径相对 `/ql/scripts`，子目录要写全。
 
 ---
 
 ## 四、本地运行
 
 ```bash
-# 方式一：命令行临时指定
 GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
-
-# 方式二：使用 .env 文件（脚本会自动读取脚本目录下的 .env）
-cp .env.example .env
-# 编辑 .env 填入 Cookie
-node src/index.js
 ```
 
 > shell 里赋值注意**加引号** —— Cookie 含分号空格、UA 含空格括号，不加引号会被 shell 截断。
@@ -202,13 +159,12 @@ node src/index.js
 
 ## 五、配置项
 
-配置来源有两个：**环境变量优先**，`.env` 文件兜底。除 `GLADOS_COOKIE` 外均可选。
+全部通过青龙面板的环境变量配置。除 `GLADOS_COOKIE` 外均可选。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `GLADOS_COOKIE` | — | **必填**。账号 Cookie，多账号用 `&` 或换行分隔。也认复数名 `GLADOS_COOKIES` |
 | `GLADOS_USER_AGENT` | Windows Chrome UA | 与登录时一致的浏览器 UA。**设备校验不通过时改这里**。也认 `GLADOS_UA` |
-| `GLADOS_ENV_FILE` | 自动查找 | `.env` 文件路径；设为 `off` 可关闭文件加载 |
 | `GLADOS_DOMAINS` | `glados.cloud,glados.rocks,glados.network` | 候选域名，逗号分隔，按顺序尝试 |
 | `GLADOS_CHECKIN_TOKEN` | `glados.cloud` | 签到 token，仅官方再次改 API 时才需要动 |
 | `EXCHANGE_PLAN` | `off` | 自动兑换档位，见下 |
@@ -275,26 +231,21 @@ node src/index.js
 
 ```
    ⚠️ 没有任何变量名包含 GLADOS / COOKIE / USER_AGENT
-   👉 最常见原因：定时任务的命令写成了 node <绝对路径>。
-   下面是当前全部变量名，可用来确认变量是否真的在环境里：
+   下面是当前全部变量名，请在列表中查找你的变量：
      "HOME"
      "PATH"
      ...
 ```
 
-**按这个顺序排查：**
+在列表里找你的变量，按这个顺序排查：
 
-1. **命令写法**（最常见，见 [第三节 3](#3-创建定时任务)）—— 必须是 `task glados-checkin/src/index.js`，
-   写成 `node /ql/scripts/...` 会绕过青龙的 Node 预加载，**面板变量一个都读不到**。
-2. **在变量名列表里找你的变量**：
-   - **找不到** → 变量未启用、未保存成功，或加在了另一个青龙实例上；
-   - **找到了但名字奇怪** → 可能是输入法打出的**全角字符**（`ＧＬＡＤＯＳ＿ＣＯＯＫＩＥ`）或大小写不一致，按实际名字修正。
-3. **变量名规范** —— 青龙官方要求「以字母或下划线开头，只能包含字母、数字和下划线」。不符合的（含空格、连字符、全角字符）会被青龙**静默丢弃**，面板里却照常显示。
-4. **兜底**：以上都正常仍读不到，再用 `.env` 文件方案（第三节方案 B）完全绕开注入机制。
+1. **找不到** → 变量未启用、未保存成功，或加在了另一个青龙实例上。
+2. **找到了但名字奇怪** → 可能是输入法打出的**全角字符**（`ＧＬＡＤＯＳ＿ＣＯＯＫＩＥ`）或大小写不一致，按列表里的实际名字修正。
+3. **变量名规范** —— 青龙要求「以字母或下划线开头，只能包含字母、数字和下划线」。不符合的（含空格、连字符、全角字符）会被青龙**静默丢弃**，面板里却照常显示。
 
 另外两个高频坑：
 
-- **连引号一起粘进去了** —— 从 `.env` 或文档里复制时把 `"` 也带上了。脚本会自动剥掉成对引号，但建议直接粘裸值。
+- **连引号一起粘进去了** —— 从文档里复制时把 `"` 也带上了。脚本会自动剥掉成对引号，但建议直接粘裸值。
 - **只复制了 `koa:*` 旧字段** —— 脚本会提示「没有 gld:sess」，见下面 `code=-2` 那条。
 
 > 脚本**只打印变量名与长度，绝不打印值**，所以可以把诊断输出直接贴出来求助。
@@ -333,7 +284,6 @@ glados-checkin/
 │   ├── config.js     # 环境变量解析与 Cookie 归一化
 │   ├── glados.js     # API 客户端（域名回退、响应分类）
 │   └── notify.js     # 推送（PushPlus / Telegram）
-├── .env.example
 ├── .gitignore
 ├── LICENSE
 └── package.json
