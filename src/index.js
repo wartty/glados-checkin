@@ -14,7 +14,7 @@
  *   1  存在失败账号 / 配置缺失 / 网络异常
  */
 
-const { loadConfig, EXCHANGE_PLANS } = require('./config');
+const { loadConfig, diagnoseEnv, EXCHANGE_PLANS } = require('./config');
 const { GladosClient, isSuccessfulCheckin, CODE } = require('./glados');
 const { buildReport, dispatch } = require('./notify');
 
@@ -190,13 +190,34 @@ async function main() {
   log('🚀 GLaDOS 签到启动');
 
   if (config.cookies.length === 0) {
-    log('❌ 未配置 GLADOS_COOKIE，退出');
-    log('   请在青龙面板「环境变量」中添加，整段复制签到页的 Cookie');
-    log('   须同时包含 gld:sess 与 gld:sess.sig 两个字段');
+    log('❌ 读不到 Cookie —— 环境变量 ' + config.cookieEnvName + ' 不存在或为空');
+    log('   请确认已在青龙「环境变量」中添加，并且处于【启用】状态');
+    log('');
+    log('🔍 环境诊断（只列变量名与长度，不打印值）:');
+
+    const diag = diagnoseEnv(process.env);
+    if (diag.interesting.length === 0) {
+      log('   没有找到任何与 GLaDOS / Cookie 相关的变量');
+      log('   → 说明青龙没有把变量传进脚本进程，重点确认变量是否【启用】、是否保存成功');
+    } else {
+      for (const item of diag.interesting) {
+        // JSON.stringify 能把尾随空格等不可见字符显示出来
+        log('   ' + JSON.stringify(item.name) + '  值长度=' + item.length);
+      }
+      log('   ↑ 名字若与 ' + config.cookieEnvName + ' 有差异（尾随空格 / 大小写 / 单复数），请改成一致');
+      log('     值长度为 0 说明变量建了但值没保存进去');
+    }
+    log('   环境变量总数: ' + diag.total);
     return 1;
   }
 
   log('📋 账号数: ' + config.cookies.length + ' | 域名: ' + config.domains.join(', '));
+  log(
+    '🖥️ User-Agent(' +
+      (config.userAgentIsDefault ? '内置默认' : '环境变量') +
+      '): ' +
+      config.userAgent
+  );
 
   // 2026-09 起会话字段改为 gld:sess / gld:sess.sig，只有旧的 koa:* 会一直返回 code=-2。
   // 这里只提示、不拦截 —— 万一站点回退到旧字段，脚本仍能正常工作。

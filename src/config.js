@@ -149,47 +149,110 @@ function parseIntEnv(value, defaultValue) {
 }
 
 /**
+ * 去掉值两端成对包裹的引号。
+ *
+ * 青龙的「环境变量」输入框不像 shell 那样会剥引号 —— 从 .env 或文档里
+ * 连引号一起粘进去时，引号会成为值本身的一部分，导致 UA 与预期不一致。
+ */
+function stripQuotes(value) {
+  const s = String(value === undefined || value === null ? '' : value).trim();
+  if (s.length < 2) return s;
+  const first = s[0];
+  const last = s[s.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+/** Cookie 环境变量的候选名（不同项目的文档用单数/复数都有）。 */
+const COOKIE_ENV_NAMES = ['GLADOS_COOKIE', 'GLADOS_COOKIES'];
+/** User-Agent 环境变量的候选名。 */
+const UA_ENV_NAMES = ['GLADOS_USER_AGENT', 'GLADOS_UA'];
+
+/**
+ * 按候选名依次取第一个非空的环境变量并剥掉引号。
+ *
+ * 支持多个候选名是为了抗「名字差一个字母就完全跑不起来」，
+ * 但绝不回落到 COOKIE / UA 这类通用名 —— 青龙的环境变量是全局的，
+ * 那样会误抓其他脚本的配置。
+ */
+function pickEnv(env, names) {
+  for (const name of names) {
+    const raw = env[name];
+    if (raw === undefined || raw === null) continue;
+    const value = stripQuotes(raw);
+    if (value) return { name: name, value: value };
+  }
+  return { name: names[0], value: '' };
+}
+
+/**
+ * 收集环境里「可能相关」的变量名，用于定位配置问题。
+ *
+ * 出于安全考虑只返回名字与长度，**不返回值本身** —— 青龙日志可能被他人看到。
+ * 名字用 JSON.stringify 输出，以便暴露尾随空格、全角字符之类不可见差异。
+ *
+ * @param {Record<string, string|undefined>} env
+ */
+function diagnoseEnv(env) {
+  const source = env || process.env;
+  const keys = Object.keys(source).sort();
+  const pattern = /GLADOS|COOKIE|USER_AGENT|^UA$|_UA$/i;
+
+  const interesting = keys
+    .filter((k) => pattern.test(k))
+    .map((k) => {
+      const v = source[k];
+      return { name: k, length: typeof v === 'string' ? v.length : 0 };
+    });
+
+  return { total: keys.length, interesting: interesting };
+}
+
+/**
  * 读取并校验完整配置。
  * @param {Record<string, string|undefined>} env
  */
 function loadConfig(env) {
   const source = env || process.env;
 
-  const cookies = parseCookies(source.GLADOS_COOKIE);
+  const cookieEnv = pickEnv(source, COOKIE_ENV_NAMES);
+  const cookies = parseCookies(cookieEnv.value);
 
-  const domains = String(source.GLADOS_DOMAINS || '')
+  const uaEnv = pickEnv(source, UA_ENV_NAMES);
+
+  const domains = stripQuotes(source.GLADOS_DOMAINS)
     .split(',')
     .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
   const exchangePlan = (() => {
-    const raw = String(source.EXCHANGE_PLAN || 'off')
-      .trim()
-      .toLowerCase();
+    const raw = stripQuotes(source.EXCHANGE_PLAN || 'off').toLowerCase();
     if (DISABLED_VALUES.has(raw)) return null;
     return Object.prototype.hasOwnProperty.call(EXCHANGE_PLANS, raw) ? raw : null;
   })();
 
-  const pushLevel = String(source.PUSH_LEVEL || 'fail_only')
-    .trim()
-    .toLowerCase();
+  const pushLevel = stripQuotes(source.PUSH_LEVEL || 'fail_only').toLowerCase();
 
   return {
     cookies: cookies,
+    cookieEnvName: cookieEnv.name,
     domains: domains.length > 0 ? domains : DEFAULT_DOMAINS.slice(),
-    checkinToken: String(source.GLADOS_CHECKIN_TOKEN || '').trim() || DEFAULT_CHECKIN_TOKEN,
-    userAgent: String(source.GLADOS_USER_AGENT || '').trim() || DEFAULT_USER_AGENT,
+    checkinToken: stripQuotes(source.GLADOS_CHECKIN_TOKEN) || DEFAULT_CHECKIN_TOKEN,
+    userAgent: uaEnv.value || DEFAULT_USER_AGENT,
+    userAgentIsDefault: !uaEnv.value,
     timeoutMs: parseIntEnv(source.GLADOS_TIMEOUT_MS, 15000),
     retries: parseIntEnv(source.GLADOS_RETRIES, 3),
     retryDelayMs: parseIntEnv(source.GLADOS_RETRY_DELAY_MS, 20000),
     exchangePlan: exchangePlan,
-    pushPlusToken: String(source.PUSHPLUS_TOKEN || '').trim(),
-    telegramBotToken: String(source.TELEGRAM_BOT_TOKEN || '').trim(),
-    telegramChatId: String(source.TELEGRAM_CHAT_ID || '').trim(),
+    pushPlusToken: stripQuotes(source.PUSHPLUS_TOKEN),
+    telegramBotToken: stripQuotes(source.TELEGRAM_BOT_TOKEN),
+    telegramChatId: stripQuotes(source.TELEGRAM_CHAT_ID),
     pushLevel: pushLevel,
     onlyFailPush: pushLevel !== 'all',
     verbose: parseBool(source.GLADOS_VERBOSE, false),
-    notifyTitlePrefix: String(source.NOTIFY_TITLE || '').trim() || 'GLaDOS 签到',
+    notifyTitlePrefix: stripQuotes(source.NOTIFY_TITLE) || 'GLaDOS 签到',
   };
 }
 
@@ -198,9 +261,14 @@ module.exports = {
   DEFAULT_CHECKIN_TOKEN,
   DEFAULT_USER_AGENT,
   EXCHANGE_PLANS,
+  COOKIE_ENV_NAMES,
+  UA_ENV_NAMES,
   normalizeCookie,
   parseCookies,
   parseBool,
   parseIntEnv,
+  stripQuotes,
+  pickEnv,
+  diagnoseEnv,
   loadConfig,
 };
