@@ -116,7 +116,9 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 ## 三、青龙面板部署
 
-### 1. 添加环境变量
+### 1. 配置（二选一）
+
+**方案 A：环境变量**（常规做法）
 
 青龙面板 → **环境变量** → **新建变量**：
 
@@ -126,6 +128,20 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 | `GLADOS_USER_AGENT` | 登录浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
 
 多账号：**多次添加** `GLADOS_COOKIE` 变量，或用 `&` / 换行在单个变量里分隔。
+
+> 值**直接粘贴，不要带引号** —— 青龙的输入框不会像 shell 那样剥引号，带上引号会变成值的一部分（脚本虽然会自动剥成对引号，但没必要绕这一圈）。
+
+**方案 B：`.env` 文件**（环境变量始终读不到时的可靠替代）
+
+青龙面板 → **脚本管理** → 在脚本目录下新建 `.env` 文件：
+
+```dotenv
+GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy"
+GLADOS_USER_AGENT="你的UA"
+```
+
+脚本会自动读取**脚本目录**或**当前工作目录**下的 `.env`；同时存在时环境变量优先。
+如果青龙无论如何都不把变量传进脚本（见第七节第一条），用这个方案可以**完全绕开它的注入机制**。
 
 ### 2. 上传脚本
 
@@ -149,26 +165,28 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 ## 四、本地运行
 
 ```bash
-# 方式一：临时指定
-GLADOS_COOKIE="koa:sess=xxx; koa:sess.sig=yyy" node src/index.js
+# 方式一：命令行临时指定
+GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
 
-# 方式二：使用 .env
+# 方式二：使用 .env 文件（脚本会自动读取脚本目录下的 .env）
 cp .env.example .env
 # 编辑 .env 填入 Cookie
 node src/index.js
 ```
 
----
+> shell 里赋值注意**加引号** —— Cookie 含分号空格、UA 含空格括号，不加引号会被 shell 截断。
+
 ---
 
 ## 五、配置项
 
-全部通过环境变量配置。除 `GLADOS_COOKIE` 外均可选。
+配置来源有两个：**环境变量优先**，`.env` 文件兜底。除 `GLADOS_COOKIE` 外均可选。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | — | **必填**。账号 Cookie，多账号用 `&` 或换行分隔 |
-| `GLADOS_USER_AGENT` | Windows Chrome UA | 与登录时一致的浏览器 UA。**设备校验不通过时改这里** |
+| `GLADOS_COOKIE` | — | **必填**。账号 Cookie，多账号用 `&` 或换行分隔。也认复数名 `GLADOS_COOKIES` |
+| `GLADOS_USER_AGENT` | Windows Chrome UA | 与登录时一致的浏览器 UA。**设备校验不通过时改这里**。也认 `GLADOS_UA` |
+| `GLADOS_ENV_FILE` | 自动查找 | `.env` 文件路径；设为 `off` 可关闭文件加载 |
 | `GLADOS_DOMAINS` | `glados.cloud,glados.rocks,glados.network` | 候选域名，逗号分隔，按顺序尝试 |
 | `GLADOS_CHECKIN_TOKEN` | `glados.cloud` | 签到 token，仅官方再次改 API 时才需要动 |
 | `EXCHANGE_PLAN` | `off` | 自动兑换档位，见下 |
@@ -213,10 +231,13 @@ node src/index.js
 
 **Q：青龙里提示「读不到 Cookie / 未配置 GLADOS_COOKIE」，但我确实配了？**
 
-最常见的原因是**变量没真正传进脚本进程**。脚本现在会打印环境诊断，直接告诉你答案：
+脚本会打印环境诊断，直接告诉你答案。分两种情况：
+
+**情况一：列出了相关变量**
 
 ```
 🔍 环境诊断（只列变量名与长度，不打印值）:
+   环境变量总数: 201
    "GLADOS_COOKIE "  值长度=312
 ```
 
@@ -227,7 +248,21 @@ node src/index.js
 | 列出 `"GLADOS_COOKIE "`（注意引号里的**尾随空格**） | 变量名末尾多了空格 | 删除重建，粘贴时注意别带上空格 |
 | 列出 `GLADOS_COOKIES` / `glados_cookie` 之类 | 名字拼写不同 | 改成 `GLADOS_COOKIE`（脚本也认复数 `GLADOS_COOKIES`） |
 | 列出 `GLADOS_COOKIE` 但**值长度=0** | 变量建了但值没保存进去 | 编辑该变量，重新粘贴 Cookie 值 |
-| **什么都没列出来** | 青龙根本没把变量传进脚本 | 检查变量是否处于【启用】状态、是否保存成功，必要时重启青龙 |
+
+**情况二：没找到任何相关变量 → 脚本会列出全部变量名**
+
+```
+   ⚠️ 没有任何变量名包含 GLADOS / COOKIE / USER_AGENT
+     下面是全部变量名，请在其中查找你的变量：
+     "HOME"
+     "PATH"
+     ...
+```
+
+先在列表里找你的变量：
+
+- **找不到** → 青龙确实没有把变量注入脚本进程（未启用、未保存成功，或执行环境与面板不是同一个）。**推荐改用 `.env` 文件方案**（第三节方案 B），完全绕开青龙的注入机制。
+- **找到了但名字奇怪** → 很可能是输入法打出的**全角字符**（`ＧＬＡＤＯＳ＿ＣＯＯＫＩＥ`）或大小写不一致。按列表里的实际名字修正。
 
 另外两个高频坑：
 

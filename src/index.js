@@ -188,26 +188,40 @@ async function main() {
   const config = loadConfig(process.env);
 
   log('🚀 GLaDOS 签到启动');
+  if (config.envFileUsed) {
+    log('📄 从 .env 读取配置: ' + config.envFileUsed);
+  }
 
   if (config.cookies.length === 0) {
     log('❌ 读不到 Cookie —— 环境变量 ' + config.cookieEnvName + ' 不存在或为空');
-    log('   请确认已在青龙「环境变量」中添加，并且处于【启用】状态');
     log('');
-    log('🔍 环境诊断（只列变量名与长度，不打印值）:');
 
     const diag = diagnoseEnv(process.env);
-    if (diag.interesting.length === 0) {
-      log('   没有找到任何与 GLaDOS / Cookie 相关的变量');
-      log('   → 说明青龙没有把变量传进脚本进程，重点确认变量是否【启用】、是否保存成功');
-    } else {
+    log('🔍 环境诊断（只列变量名与长度，不打印值）:');
+    log('   环境变量总数: ' + diag.total);
+
+    if (diag.interesting.length > 0) {
       for (const item of diag.interesting) {
         // JSON.stringify 能把尾随空格等不可见字符显示出来
         log('   ' + JSON.stringify(item.name) + '  值长度=' + item.length);
       }
       log('   ↑ 名字若与 ' + config.cookieEnvName + ' 有差异（尾随空格 / 大小写 / 单复数），请改成一致');
       log('     值长度为 0 说明变量建了但值没保存进去');
+    } else {
+      log('   ⚠️ 没有任何变量名包含 GLADOS / COOKIE / USER_AGENT');
+      log('   → 青龙很可能没有把这个变量注入脚本进程。');
+      log('     下面是全部变量名，请在其中查找你的变量：');
+      log('');
+      for (const name of diag.names) {
+        log('     ' + JSON.stringify(name));
+      }
+      log('');
+      log('   👉 若上面根本没有你的变量，说明确实没注入进来，两个办法（推荐第一个）：');
+      log('      1) 在脚本目录放一个 .env 文件，完全绕开青龙的变量注入：');
+      log('         GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy"');
+      log('         GLADOS_USER_AGENT="你的UA"');
+      log('      2) 检查青龙「环境变量」是否【启用】/ 保存成功，或重启青龙');
     }
-    log('   环境变量总数: ' + diag.total);
     return 1;
   }
 

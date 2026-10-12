@@ -3,9 +3,15 @@
 /**
  * 配置解析层。
  *
- * 所有配置来自环境变量，便于青龙面板 / Docker / systemd 等场景直接注入。
- * 这里刻意不做任何 I/O，保持纯函数，方便单测。
+ * 配置有两个来源，环境变量优先，`.env` 文件兜底：
+ *   1. 环境变量 —— 青龙面板 / Docker / systemd 注入
+ *   2. `.env` 文件 —— 脚本目录或当前工作目录下，用于青龙没有注入变量的场合
+ *
+ * 解析逻辑保持纯函数，只有 `.env` 读取涉及 I/O，便于单测。
  */
+
+const fs = require('node:fs');
+const path = require('node:path');
 
 /** 站点域名候选，按优先级排列。Cookie 与签发域名绑定，逐个试直到通为止。 */
 const DEFAULT_DOMAINS = [
@@ -188,6 +194,68 @@ function pickEnv(env, names) {
 }
 
 /**
+ * 极简 .env 解析（零依赖）。
+ *
+ * 支持 `KEY=VALUE`、`#` 注释、空行、成对包裹的引号（引号内内容原样保留）。
+ * 不支持多行值 —— 本项目无此需求，保持实现简单可预测。
+ *
+ * @param {string} content
+ * @returns {Record<string,string>}
+ */
+function parseEnvFile(content) {
+  const out = {};
+  const text = content === undefined || content === null ? '' : String(content);
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+
+    const key = line.slice(0, eq).trim();
+    if (!key) continue;
+
+    let value = line.slice(eq + 1).trim();
+    if (value.length >= 2) {
+      const first = value[0];
+      const last = value[value.length - 1];
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+        value = value.slice(1, -1);
+      }
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * 按候选顺序查找并读取 .env 文件。
+ * 顺序：`GLADOS_ENV_FILE` 指定路径 → 项目根（src 的上一级）→ 当前工作目录。
+ *
+ * @returns {{path: string, values: Record<string,string>}|null}
+ */
+function findEnvFile(env) {
+  const candidates = [];
+  const override = stripQuotes((env || {}).GLADOS_ENV_FILE);
+  // 显式关闭：GLADOS_ENV_FILE=off
+  if (override && DISABLED_VALUES.has(override.toLowerCase())) return null;
+  if (override) candidates.push(path.resolve(override));
+  candidates.push(path.resolve(__dirname, '..', '.env'));
+  candidates.push(path.resolve(process.cwd(), '.env'));
+
+  for (const candidate of candidates) {
+    try {
+      const values = parseEnvFile(fs.readFileSync(candidate, 'utf8'));
+      if (Object.keys(values).length > 0) return { path: candidate, values: values };
+    } catch {
+      // 不存在或不可读，继续尝试下一个
+    }
+  }
+  return null;
+}
+
+/**
  * 收集环境里「可能相关」的变量名，用于定位配置问题。
  *
  * 出于安全考虑只返回名字与长度，**不返回值本身** —— 青龙日志可能被他人看到。
@@ -207,7 +275,7 @@ function diagnoseEnv(env) {
       return { name: k, length: typeof v === 'string' ? v.length : 0 };
     });
 
-  return { total: keys.length, interesting: interesting };
+  return { total: keys.length, interesting: interesting, names: keys };
 }
 
 /**
@@ -215,7 +283,16 @@ function diagnoseEnv(env) {
  * @param {Record<string, string|undefined>} env
  */
 function loadConfig(env) {
-  const source = env || process.env;
+  const rawEnv = env || process.env;
+
+  // 真实环境变量优先；空的真实变量不覆盖 .env 里的值
+  const fileEnv = findEnvFile(rawEnv);
+  const source = {};
+  if (fileEnv) Object.assign(source, fileEnv.values);
+  for (const key of Object.keys(rawEnv)) {
+    const value = rawEnv[key];
+    if (typeof value === 'string' && value.trim()) source[key] = value;
+  }
 
   const cookieEnv = pickEnv(source, COOKIE_ENV_NAMES);
   const cookies = parseCookies(cookieEnv.value);
@@ -238,6 +315,7 @@ function loadConfig(env) {
   return {
     cookies: cookies,
     cookieEnvName: cookieEnv.name,
+    envFileUsed: fileEnv ? fileEnv.path : null,
     domains: domains.length > 0 ? domains : DEFAULT_DOMAINS.slice(),
     checkinToken: stripQuotes(source.GLADOS_CHECKIN_TOKEN) || DEFAULT_CHECKIN_TOKEN,
     userAgent: uaEnv.value || DEFAULT_USER_AGENT,
@@ -269,6 +347,8 @@ module.exports = {
   parseIntEnv,
   stripQuotes,
   pickEnv,
+  parseEnvFile,
+  findEnvFile,
   diagnoseEnv,
   loadConfig,
 };
