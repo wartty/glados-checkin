@@ -19,9 +19,13 @@ const { EXCHANGE_PLANS } = require('./config');
 /**
  * 服务端返回码语义。
  *
- * 0/1/-2 来自两个站点的实测；2/3 取自 railgun.info 前端代码里的判断：
- *   3 === code ? "Daily limit reached"   // 今日额度已用完 = 今天签过了
+ * 0/1/2/3 取自 railgun.info 前端代码，-2 为两个站点实测：
+ *   3 === code ? "Daily limit reached"
  *   2 === code ? "Too fast, please wait"
+ *
+ * 注意：「今日已签到」不能只看返回码 —— Railgun 用它自己的码表达，
+ * 且前端对任何非 0 返回都会转去查 /user/points 确认。可靠判据是
+ * CheckinClient#hasCheckedInToday()。
  */
 const CODE = {
   SUCCESS: 0,
@@ -32,23 +36,41 @@ const CODE = {
   NO_PERMISSION: -2,
 };
 
-/**
- * 按返回码直接判定「今日已签到」的码。
- *
- * 只收 code=3：Railgun 用它表示 "Daily limit reached"，语义明确。
- *
- * 特意【不含】code=1 —— GLaDOS 的 code=1 是双关的：
- * 「已经签过」和「token 错误」都回 1，必须结合 message 才能区分，
- * 否则 token 失效会被误报成「今日已签到」，静默漏签。
- */
-const ALREADY_CHECKED_IN_CODES = new Set([CODE.DAILY_LIMIT]);
-
 /** 视为「签到成功」的消息特征（小写匹配）。中英文站点都覆盖。 */
 const SUCCESS_MARKERS = [
   'checkin! got',
-  'checkin repeats! please try tomorrow',
   "today's observation logged",
 ];
+
+/**
+ * 服务端文案直接表达「今天已经签过了」的特征。
+ *
+ * 与 SUCCESS_MARKERS 分开：这不是「刚签到成功」，而是「本次没签、但今天已完成」，
+ * 两者对用户的意义不同 —— 后者要明确告诉他账号已经签过了。
+ */
+const REPEAT_MARKERS = [
+  'checkin repeats',
+  'please try tomorrow',
+];
+
+/** 文案是否表明「今天已经签过了」。 */
+function isRepeatByMessage(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const message = String(payload.message || '').toLowerCase();
+  return REPEAT_MARKERS.some((marker) => message.includes(marker));
+}
+
+/**
+ * 文案是否表明「签到 token 不对」。
+ *
+ * GLaDOS 在 token 与域名不匹配时会回 "please checkin via <域名>"。
+ * 这是确定性问题，重试无用，而且**不能**被「今天已签到」的判定掩盖掉 ——
+ * 否则用户要等到第二天真失败时才会发现 token 配错了。
+ */
+function isTokenOutdated(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  return String(payload.message || '').toLowerCase().includes('please checkin via');
+}
 
 /** 从域名 URL 取出主机名，用于推导签到 token。 */
 function hostnameOf(domain) {
@@ -60,6 +82,43 @@ function hostnameOf(domain) {
 
 /** 取不到账号信息时的占位值。 */
 const UNKNOWN = '未知';
+
+/** 取「今天」的 YYYY-MM-DD。站点面向中文用户，按北京时间算。 */
+function todayString() {
+  try {
+    return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * 从积分历史里提取「已签到的日期」（YYYY-MM-DD）。
+ *
+ * 与站点前端 checkedDates 的实现保持一致：
+ * 只看 business 含 checkin 且 change > 0 的记录，日期取 detail 开头
+ * 或 business 里的 `checkin:YYYY-MM-DD`。
+ */
+function extractCheckedDates(history) {
+  if (!Array.isArray(history)) return [];
+
+  const out = [];
+  for (const item of history) {
+    if (!item) continue;
+
+    const business = String(item.business || '');
+    if (!/checkin/i.test(business)) continue;
+    if (!(Number(item.change) > 0)) continue;
+
+    const detail = String(item.detail || '');
+    const date = /^\d{4}-\d{2}-\d{2}/.test(detail)
+      ? detail.slice(0, 10)
+      : (business.match(/checkin[:=](\d{4}-\d{2}-\d{2})/i) || [])[1];
+
+    if (date) out.push(date);
+  }
+  return out;
+}
 
 class CheckinClient {
   /**
@@ -93,6 +152,11 @@ class CheckinClient {
     this.pointsChange = UNKNOWN;
     this.exchangeInfo = '';
     this.plan = UNKNOWN;
+
+    // 今日签到状态（来自 /user/points）
+    this.checkedIn = false;
+    this.today = '';
+    this.checkedDates = [];
   }
 
   /**
@@ -101,6 +165,30 @@ class CheckinClient {
    */
   hasAccountInfo() {
     return this.email !== UNKNOWN;
+  }
+
+  /**
+   * 今天是否已经签过。
+   *
+   * 站点前端在签到返回非 0 时就是这么判断的：转去查 /user/points，
+   * 看 `checkedIn` 或历史里有没有今天 —— 两者都说不清才算没签。
+   * 之所以不能只看签到返回码：Railgun 的「已签到」并不用成功码表达。
+   *
+   * @returns {Promise<{done: boolean, basis: string}>} basis 说明判断依据，便于日志交代清楚
+   */
+  async hasCheckedInToday() {
+    await this.fetchPoints();
+
+    if (this.checkedIn) {
+      return { done: true, basis: 'points.checkedIn=true' };
+    }
+
+    const today = this.today || todayString();
+    if (this.checkedDates.indexOf(today) !== -1) {
+      return { done: true, basis: '历史记录含 ' + today };
+    }
+
+    return { done: false, basis: '' };
   }
 
   /**
@@ -253,6 +341,11 @@ class CheckinClient {
         this.pointsChange = change.startsWith('-') ? change : '+' + change;
       }
 
+      // 今日签到状态：签到返回非 0 时靠这几个字段判断今天是否已完成
+      this.checkedIn = res.checkedIn === true;
+      if (res.today) this.today = String(res.today);
+      this.checkedDates = extractCheckedDates(history);
+
       if (res.plan) this.plan = String(res.plan);
       if (res.plans && typeof res.plans === 'object') {
         const pts = Number.parseInt(this.points, 10);
@@ -283,10 +376,11 @@ class CheckinClient {
 }
 
 /**
- * 判断签到响应是否属于「成功」或「今日已签到」这类正常结果。
+ * 判断签到响应本身是否表达了「成功」。
  *
- * 重复签到不算失败 —— GLaDOS 回 code=1，Railgun 回 code=3（Daily limit reached），
- * 两者都应当作正常结果，否则每天第二次运行就会误报失败并推送告警。
+ * 只认 code=0 与已知的成功文案。**不包含**「今日已签到」的判定 ——
+ * 那件事必须结合 /user/points 才能下结论（见 hasCheckedInToday），
+ * 单看返回码会把 token 失效之类的失败误判成已完成，导致静默漏签。
  *
  * @param {any} payload checkin 接口返回的 JSON
  */
@@ -294,7 +388,6 @@ function isSuccessfulCheckin(payload) {
   if (!payload || typeof payload !== 'object') return false;
 
   if (payload.code === CODE.SUCCESS) return true;
-  if (ALREADY_CHECKED_IN_CODES.has(payload.code)) return true;
 
   const message = String(payload.message || '').toLowerCase();
   return SUCCESS_MARKERS.some((marker) => message.includes(marker));
@@ -314,11 +407,15 @@ function isAuthenticated(result, client) {
 
 module.exports = {
   CODE,
-  ALREADY_CHECKED_IN_CODES,
   SUCCESS_MARKERS,
+  REPEAT_MARKERS,
   UNKNOWN,
   hostnameOf,
+  todayString,
+  extractCheckedDates,
   CheckinClient,
   isSuccessfulCheckin,
+  isRepeatByMessage,
+  isTokenOutdated,
   isAuthenticated,
 };

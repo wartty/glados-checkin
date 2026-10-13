@@ -97,12 +97,17 @@ Windows / macOS / Linux / Android / iOS / Bot / Other
 
 **要不要配？**
 
-| 你的登录环境 | 是否需要配置 |
+| 站点 | 是否需要配置 |
+| --- | --- |
+| GLaDOS | **非 Windows 登录必须配**（`GLADOS_USER_AGENT`），否则会被判为自动签到 |
+| Railgun | **不需要** —— 它的设备标识是 `RAILGUN_AUTHORIZATION` 指纹，与 UA 无关 |
+
+| 你的登录环境（GLaDOS） | 是否需要配置 |
 | --- | --- |
 | Windows 电脑的 Chrome / Edge | **不用配**，脚本默认值就是 Windows Chrome |
 | macOS / Linux / 手机 / iPad | **必须配**，否则会被判为自动签到 |
 
-**怎么填** —— 变量名按站点选，GLaDOS 用 `GLADOS_USER_AGENT`，Railgun 用 `RAILGUN_USER_AGENT`：
+**怎么填** —— 变量名按站点选，GLaDOS 用 `GLADOS_USER_AGENT`，Railgun 用 `RAILGUN_USER_AGENT`（后者通常不需要）：
 
 | 场景 | 写法 |
 | --- | --- |
@@ -137,7 +142,7 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 | `GLADOS_COOKIE` | glados.cloud 的完整 Cookie（须含 `gld:sess`） | 有 GLaDOS 账号时 |
 | `RAILGUN_COOKIE` | railgun.info 的完整 Cookie（须含 `koa:sess`） | 有 Railgun 账号时 |
 | `GLADOS_USER_AGENT` | 登录 glados 浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
-| `RAILGUN_USER_AGENT` | 登录 railgun 浏览器的 User-Agent | 非 Windows 登录时必填 |
+| `RAILGUN_USER_AGENT` | 登录 railgun 浏览器的 User-Agent | 不需要（Railgun 用指纹识别设备） |
 
 两个都配就一次跑完两个站点；只配一个就是单站点。
 
@@ -211,7 +216,7 @@ GLADOS_COOKIE="..." RAILGUN_COOKIE="..." node src/index.js --dry-run
 | **账号属于哪个站点** | 迁移场景的关键 —— 报「账号不在 X」就说明该换另一个站点的变量 |
 | 请求头被接受 | Origin / Referer / User-Agent 都对上了才有响应 |
 
-**体检通过后**，去掉 `--dry-run` 跑正式签到即可。签到本身是幂等的 —— 重复跑只会显示「今日已签到」，没有副作用。
+**体检通过后**，去掉 `--dry-run` 跑正式签到即可。签到本身是幂等的 —— 重复跑只会提示「今日已完成签到」，没有副作用。
 
 > 唯一体检**验不出来**的是签到 token，因为只有 `checkin` 接口才用它。万一 token 值有问题，日志会直接给出服务端期望的域名，用 `<站点>_CHECKIN_TOKEN` 覆盖即可。
 
@@ -257,7 +262,7 @@ task glados-checkin/src/index.js --dry-run
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `XXX_COOKIE` | — | 该站点的账号 Cookie，多账号用 `&` 或换行分隔。也认复数名 `XXX_COOKIES` |
-| `XXX_USER_AGENT` | Windows Chrome UA | 该站点登录时的浏览器 UA。**设备校验不通过时改这里**。也认 `XXX_UA` |
+| `XXX_USER_AGENT` | Windows Chrome UA | 该浏览器 UA。GLaDOS 用它做设备校验；Railgun 不需要。也认 `XXX_UA` |
 | `XXX_DOMAINS` | GLaDOS: `glados.cloud,glados.rocks,glados.network`<br>Railgun: `railgun.info` | 候选域名，逗号分隔，按顺序尝试 |
 | `XXX_CHECKIN_TOKEN` | 按域名自动推导 | 正常不用配，仅官方再次改 API 时才需要覆盖 |
 | `XXX_AUTHORIZATION` | — | 设备指纹，放在 `Authorization` 头里（**不是令牌**）。Railgun 建议配，见下 |
@@ -318,7 +323,7 @@ RAILGUN_AUTHORIZATION=<画布哈希>-1080-1920
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 全部账号成功（含「今日已签到」） |
+| `0` | 全部账号成功（含「今日已完成签到」） |
 | `1` | 存在失败账号 / 未配置 Cookie / 网络异常 |
 
 ---
@@ -363,18 +368,36 @@ GLaDOS 改 `GLADOS_USER_AGENT`，Railgun 改 `RAILGUN_USER_AGENT`。
 **Q：账号在 Railgun，但我只配了 glados 的 Cookie？**
 脚本只签到**配了 Cookie 的站点**，不会拿 glados 的 Cookie 去试 railgun。账号在哪个站点，就配哪个站点的 Cookie 变量。
 
-**Q：`今日已签到` 算失败吗？**
-不算。这表示今天已经签到过了，脚本会返回退出码 `0`。两个站点的判定方式不同：
+**Q：`今日已完成签到` 是什么意思？算失败吗？**
+不算 —— 这正是**成功**的一种，退出码 `0`。它表示：本次没签到，但账号今天**早就签过了**（比如你手动签过，或当天第二次运行）。
 
-| 站点 | 重复签到的返回 |
+脚本会区分「刚签到成功」和「今天已经签过」，因为两者意义不同：
+
+```
+ℹ️ 账号今日已完成签到（服务端返回「Checkin Repeats! Please Try Tomorrow」），本次不重复签到
+✅ [GLaDOS] 账号 1 | 积分: 412 | 天数: 29 | 今日已完成签到（服务端返回「...」）
+```
+
+判定依据也会写进结果，两个站点各自取最可靠的信号：
+
+| 站点 | 怎么判定今天已经签过 |
 | --- | --- |
-| GLaDOS | `code=1` + `Checkin Repeats!` |
-| Railgun | `code=3`（`Daily limit reached`） |
+| GLaDOS | 服务端文案（`Checkin Repeats!`） |
+| Railgun | 转去查 `/user/points`，看 `checkedIn` 或历史里有没有今天 |
 
-> 注意 GLaDOS 的 `code=1` 是**双关的** —— 「已经签过」和「token 错误」都回 1，所以脚本必须结合 message 才能区分。只看返回码会把 token 失效误报成「今日已签到」，从而静默漏签。
+> **为什么 Railgun 要额外查一次？** 它的「已签到」不用成功码表达。站点前端对**任何**非 0 返回都会转去查 `/user/points` 确认 —— 只看签到返回码，每天第二次运行就会误报失败并推送告警。
+
+**Q：日志显示 `签到 token 已失效`？**
+服务端回了 `please checkin via <域名>`，说明签到 token 与当前域名不符。这是**确定性失败，不会重试**。
+正常情况 token 由域名自动推导，不会出错；真遇到就用 `<站点>_CHECKIN_TOKEN` 覆盖成提示里的那个域名。
+
+> 这个判定排在「今日已完成签到」**之前** —— 否则 token 配错时，只要当天恰好签过就会被误判为一切正常，问题要拖到第二天才暴露。
 
 **Q：日志显示 `请求过快被限流`？**
 Railgun 回了 `code=2`（`Too fast, please wait`）。这是可恢复的，脚本会按 `CHECKIN_RETRY_DELAY_MS` 重试；仍失败就稍后再跑一次。
+
+**Q：日志显示 `原始响应: {...}`？**
+说明服务端返回了一个脚本还没识别的码。日志里已经把原始响应带上了，**直接把那一行发出来**即可定位，不需要再开 `--debug`。
 
 **Q：需要装依赖吗？**
 不需要。脚本只用 Node 内置的 `fetch`，青龙面板的「依赖管理」不用管。只需要 Node 18 以上版本。

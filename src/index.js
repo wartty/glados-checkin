@@ -69,11 +69,16 @@ function logSiteSummary(config, log) {
     log('   💡 未配 ' + site.authEnv[0] + ' —— ' + site.authNote);
   }
 
-  log(
-    '   User-Agent(' +
-      (config.userAgentIsDefault ? '内置默认' : '环境变量') +
-      '): ' + config.userAgent
-  );
+  // UA 只对 GLaDOS 是必需的（它据此做设备校验）；Railgun 靠指纹识别设备
+  if (config.userAgentIsDefault && site.uaOptional) {
+    log('   User-Agent: 内置默认（该站点不依赖 UA 识别设备）');
+  } else {
+    log(
+      '   User-Agent(' +
+        (config.userAgentIsDefault ? '内置默认' : '环境变量') +
+        '): ' + config.userAgent
+    );
+  }
 
   // 会话字段提示：命中任一候选字段就不提示，避免误报
   const expected = site.sessionFields || [];

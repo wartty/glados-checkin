@@ -54,7 +54,12 @@ const SITES = [
     label: 'Railgun',
     hosts: ['railgun.info'],
     cookieEnv: ['RAILGUN_COOKIE', 'RAILGUN_COOKIES'],
+    /**
+     * Railgun 的设备标识是指纹（见 authEnv），不是 UA —— 实测用内置默认
+     * Windows UA 也能通过鉴权。这里保留变量只是给「确实想改」的人一个口子。
+     */
     uaEnv: ['RAILGUN_USER_AGENT', 'RAILGUN_UA'],
+    uaOptional: true,
     domainsEnv: ['RAILGUN_DOMAINS'],
     tokenEnv: ['RAILGUN_CHECKIN_TOKEN'],
     /**
@@ -64,8 +69,8 @@ const SITES = [
      *   Ta = getCanvasFingerprint() + "-" + screen.height + "-" + screen.width
      * 形如 `<画布哈希>-1080-1920`，同一个浏览器基本不变（不会像会话那样过期）。
      *
-     * 服务端很可能把会话与指纹绑定。只带 Cookie 不带指纹时，请求看起来
-     * 像「另一台设备」，可能因此被拒。所以这一项建议配上：
+     * 服务端把会话与指纹绑定：只带 Cookie 不带指纹时，请求看起来像
+     * 「另一台设备」，会被拒绝（code=-2）。所以这一项**必须配**：
      * 从浏览器任意一个 /api/user/... 请求的 Request Headers 里复制即可。
      */
     authEnv: ['RAILGUN_AUTHORIZATION'],

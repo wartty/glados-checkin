@@ -8,7 +8,14 @@
  */
 
 const { EXCHANGE_PLANS } = require('./config');
-const { CheckinClient, isSuccessfulCheckin, UNKNOWN, CODE } = require('./client');
+const {
+  CheckinClient,
+  isSuccessfulCheckin,
+  isRepeatByMessage,
+  isTokenOutdated,
+  UNKNOWN,
+  CODE,
+} = require('./client');
 
 /** 等待若干毫秒。 */
 function sleep(ms) {
@@ -28,9 +35,13 @@ function isDeterministicFailure(data) {
 
 /**
  * 带重试的签到。
- * 成功、今日已签到、以及确定性失败都会立即返回，不浪费重试次数。
  *
- * @returns {Promise<{result: object|null, success: boolean}>}
+ * 三种情况立即返回，不浪费重试次数：
+ *   1. 刚签到成功
+ *   2. 今天已经签过了（本次没签成，但不是失败）
+ *   3. 确定性失败（凭证失效 / 设备校验）
+ *
+ * @returns {Promise<{result: object|null, success: boolean, alreadyCheckedIn?: boolean, basis?: string}>}
  */
 async function checkinWithRetry(client, retries, retryDelayMs, log) {
   const attempts = Math.max(1, retries);
@@ -39,17 +50,49 @@ async function checkinWithRetry(client, retries, retryDelayMs, log) {
   for (let i = 1; i <= attempts; i += 1) {
     last = await client.checkin();
 
-    if (last.ok && isSuccessfulCheckin(last.data)) {
+    if (!last.ok) {
+      if (i < attempts) {
+        log(
+          '⚠️ 签到第 ' + i + '/' + attempts + ' 次未成功，' +
+            Math.round(retryDelayMs / 1000) + ' 秒后重试'
+        );
+        await sleep(retryDelayMs);
+      }
+      continue;
+    }
+
+    // 今天已经签过了 —— 先看服务端文案（GLaDOS 走这条）
+    if (isRepeatByMessage(last.data)) {
+      const basis = '服务端返回「' + String(last.data.message || '').trim() + '」';
+      log('ℹ️ 账号今日已完成签到（' + basis + '），本次不重复签到');
+      return { result: last, success: true, alreadyCheckedIn: true, basis: basis };
+    }
+
+    if (isSuccessfulCheckin(last.data)) {
       return { result: last, success: true };
     }
 
-    if (last.ok && isDeterministicFailure(last.data)) {
+    // token 不对是确定性问题：先于「已签到」判定拦下，避免被今天已签到掩盖
+    if (isTokenOutdated(last.data)) {
+      log('⛔ 签到 token 已失效（' + String(last.data.message || '').trim() + '），重试无意义');
+      return { result: last, success: false };
+    }
+
+    if (isDeterministicFailure(last.data)) {
       log(
         last.data.code === CODE.DEVICE_MISMATCH
           ? '⛔ 设备校验未通过，重试无意义，跳过'
           : '⛔ 凭证失效或无权限，重试无意义，跳过'
       );
       return { result: last, success: false };
+    }
+
+    // 文案没说清楚的（Railgun 就是这种）：照站点前端的做法查 /user/points，
+    // 靠 checkedIn / 历史日期确认。否则每天第二次运行都会误报失败。
+    const check = await client.hasCheckedInToday();
+    if (check.done) {
+      log('ℹ️ 账号今日已完成签到（' + check.basis + '），本次不重复签到');
+      return { result: last, success: true, alreadyCheckedIn: true, basis: check.basis };
     }
 
     if (i < attempts) {
@@ -79,14 +122,6 @@ function describeResult(result, site) {
   const message = String(data.message || '无返回信息');
 
   if (isSuccessfulCheckin(data)) {
-    // 重复签到不是失败：GLaDOS 回 repeats，Railgun 回 code=3（Daily limit reached）
-    if (data.code === CODE.DAILY_LIMIT) {
-      // 保留服务端原文 —— 万一这个码的含义与理解不符，日志里能看出来
-      return { message: '今日已签到（' + message + '）', success: true };
-    }
-    if (message.toLowerCase().includes('repeats')) {
-      return { message: '今日已签到', success: true };
-    }
     return { message: '签到成功 — ' + message, success: true };
   }
 
@@ -109,13 +144,44 @@ function describeResult(result, site) {
     return { message: '凭证失效或无权限，请重新获取 (code=-2)', success: false };
   }
 
+  if (isTokenOutdated(data)) {
+    return {
+      message:
+        '签到 token 与站点不符（服务端返回：' + message +
+        '）—— 用 <站点>_CHECKIN_TOKEN 覆盖为上面那个域名',
+      success: false,
+    };
+  }
+
   if (data.code === CODE.TOO_FAST) {
     return { message: '请求过快被限流（' + message + '），可稍后重试', success: false };
   }
 
-  // 这里的「未知」指返回码未知，与 client 里的账号信息哨兵不是一回事
+  if (data.code === CODE.DAILY_LIMIT) {
+    // 走到这里说明 /user/points 也没显示今天签过，不能当成已签到放过
+    return {
+      message: '服务端提示额度已用完，但 points 显示今天未签到 —— 请人工确认（' + message + '）',
+      success: false,
+    };
+  }
+
+  // 未识别的返回：把原始响应带上，失败日志本身就能用来定位
   const code = data.code === undefined ? '?' : data.code;
-  return { message: message + ' (code=' + code + ')', success: false };
+  return {
+    message: message + ' (code=' + code + ')  原始响应: ' + compactJson(data),
+    success: false,
+  };
+}
+
+/** 把响应压成一行短文本，供日志使用。 */
+function compactJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    if (!text) return String(value);
+    return text.length > 240 ? text.slice(0, 240) + '…' : text;
+  } catch {
+    return '(无法序列化)';
+  }
 }
 
 /**
@@ -185,12 +251,15 @@ async function processAccount(cookie, index, config, log, options) {
   });
 
   let checkinResult = null;
+  let already = null;
+
   if (opts.dryRun) {
     log('🔎 [' + site.label + '] 账号 ' + index + ' 只读体检（不签到）');
   } else {
     log('▶️ [' + site.label + '] 账号 ' + index + ' 开始签到');
     const outcome = await checkinWithRetry(client, config.retries, config.retryDelayMs, log);
     checkinResult = outcome.result;
+    if (outcome.alreadyCheckedIn) already = { basis: outcome.basis || '' };
   }
 
   // 无论签到成败都拉一次账号信息：既用于汇报，也能判断凭证是否有效
@@ -206,6 +275,12 @@ async function processAccount(cookie, index, config, log, options) {
           message: '该站点拒绝此凭证 (code=-2) —— 可能已失效，或账号不在 ' + site.label,
           success: false,
         };
+  } else if (already) {
+    // 签到没成功码，但确认今天已完成 —— 不是失败，也不是又签了一次
+    described = {
+      message: '今日已完成签到' + (already.basis ? '（' + already.basis + '）' : ''),
+      success: true,
+    };
   } else {
     described = describeResult(checkinResult, site);
   }
