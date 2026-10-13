@@ -7,6 +7,8 @@
  * 推送只是附带，任何推送异常都只记录日志。
  */
 
+const { UNKNOWN } = require('./client');
+
 /** 把文本转义成 HTML，避免邮箱等字段里的特殊字符破坏推送排版。 */
 function escapeHtml(input) {
   return String(input === undefined || input === null ? '' : input)
@@ -20,7 +22,7 @@ function escapeHtml(input) {
 /**
  * 汇总各账号结果，生成推送正文（HTML）。
  *
- * @param {Array<{email: string, points: string, pointsChange: string, leftDays: string, message: string, success: boolean, exchangeResult?: string, exchangeInfo?: string}>} accounts
+ * @param {Array<{site?: string, email: string, points: string, pointsChange: string, leftDays: string, message: string, success: boolean, exchangeResult?: string, exchangeInfo?: string}>} accounts
  * @param {{titlePrefix?: string, timestamp?: string}} [options]
  * @returns {{title: string, html: string, text: string}}
  */
@@ -30,16 +32,22 @@ function buildReport(accounts, options) {
   const total = accounts.length;
 
   const title =
-    (opts.titlePrefix || 'GLaDOS 签到') + ': 成功 ' + successCount + '/' + total;
+    (opts.titlePrefix || '签到结果') + ': 成功 ' + successCount + '/' + total;
+
+  // 多站点时在每条结果前标注站点，单站点则省略以免啰嗦
+  const sites = new Set(accounts.map((a) => a.site).filter(Boolean));
+  const showSite = sites.size > 1;
+
+  const siteTag = (a) => (showSite && a.site ? '[' + escapeHtml(a.site) + '] ' : '');
 
   const blocks = accounts.map((a, index) => {
     const icon = a.success ? '✅' : '❌';
     const lines = [
-      '<h3>' + icon + ' 账号 ' + (index + 1) + ' · ' + escapeHtml(a.email) + '</h3>',
+      '<h3>' + icon + ' ' + siteTag(a) + '账号 ' + (index + 1) + ' · ' + escapeHtml(a.email) + '</h3>',
       '<ul>',
       '<li><b>签到结果:</b> ' + escapeHtml(a.message) + '</li>',
       '<li><b>当前积分:</b> ' + escapeHtml(a.points) +
-        (a.pointsChange && a.pointsChange !== '未知' ? ' (' + escapeHtml(a.pointsChange) + ')' : '') +
+        (a.pointsChange && a.pointsChange !== UNKNOWN ? ' (' + escapeHtml(a.pointsChange) + ')' : '') +
         '</li>',
       '<li><b>剩余天数:</b> ' + escapeHtml(a.leftDays) + ' 天</li>',
     ];
@@ -64,7 +72,7 @@ function buildReport(accounts, options) {
   const text = accounts
     .map((a, index) => {
       const icon = a.success ? '✅' : '❌';
-      let s = icon + ' 账号 ' + (index + 1) + ' ' + a.email + '\n';
+      let s = icon + ' ' + siteTag(a) + '账号 ' + (index + 1) + ' ' + a.email + '\n';
       s += '签到结果: ' + a.message + '\n';
       s += '当前积分: ' + a.points + '\n';
       s += '剩余天数: ' + a.leftDays + ' 天';

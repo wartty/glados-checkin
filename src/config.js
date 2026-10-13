@@ -4,21 +4,15 @@
  * 配置解析层。
  *
  * 配置全部来自青龙面板的环境变量。纯函数、不做 I/O，便于单测。
+ *
+ * 多站点：GLaDOS 与 Railgun 协议相同，差异只在域名、环境变量名与会话字段，
+ * 这些都由 sites.js 的站点档案描述，这里负责按档案把环境变量读出来。
  */
 
-/** 站点域名候选，按优先级排列。Cookie 与签发域名绑定，逐个试直到通为止。 */
-const DEFAULT_DOMAINS = [
-  'https://glados.cloud',
-  'https://glados.rocks',
-  'https://glados.network',
-];
+const { SITES, getSite } = require('./sites');
 
-/**
- * 签到 token 必须与请求域名一致。
- * GLaDOS 在 2026 年初更新了 API：旧值 glados.one 会返回
- * "please checkin via https://glados.cloud"，签到不会生效。
- */
-const DEFAULT_CHECKIN_TOKEN = 'glados.cloud';
+/** 不带站点参数时使用的默认站点，用于保持原有行为。 */
+const DEFAULT_SITE_KEY = 'glados';
 
 /**
  * GLaDOS 从 2026-09 起会校验「签到请求的平台」与「登录时浏览器的平台」。
@@ -164,10 +158,20 @@ function stripQuotes(value) {
   return s;
 }
 
-/** Cookie 环境变量的候选名（不同项目的文档用单数/复数都有）。 */
-const COOKIE_ENV_NAMES = ['GLADOS_COOKIE', 'GLADOS_COOKIES'];
-/** User-Agent 环境变量的候选名。 */
-const UA_ENV_NAMES = ['GLADOS_USER_AGENT', 'GLADOS_UA'];
+/** 跨站点共用的可调参数。新名字优先，同时兼容旧的 GLADOS_ 前缀名。 */
+const TIMEOUT_ENV = ['CHECKIN_TIMEOUT_MS', 'GLADOS_TIMEOUT_MS'];
+const RETRIES_ENV = ['CHECKIN_RETRIES', 'GLADOS_RETRIES'];
+const RETRY_DELAY_ENV = ['CHECKIN_RETRY_DELAY_MS', 'GLADOS_RETRY_DELAY_MS'];
+
+/**
+ * 归一化一个域名：补上协议、去掉尾部斜杠。
+ * 留空返回空串，交由调用方决定是否回落默认值。
+ */
+function normalizeHost(value) {
+  const s = stripQuotes(value).replace(/\/+$/, '');
+  if (!s) return '';
+  return /^https?:\/\//i.test(s) ? s : 'https://' + s;
+}
 
 /**
  * 按候选名依次取第一个非空的环境变量并剥掉引号。
@@ -210,24 +214,31 @@ function diagnoseEnv(env) {
 }
 
 /**
- * 读取并校验完整配置。
+ * 读取单个站点的配置。
+ *
  * @param {Record<string, string|undefined>} env
+ * @param {object} [site] sites.js 里的站点档案；不传则按 GLaDOS 处理
  */
-function loadConfig(env) {
+function loadConfig(env, site) {
   const source = env || process.env;
+  const profile = site || getSite(DEFAULT_SITE_KEY);
 
-  const cookieEnv = pickEnv(source, COOKIE_ENV_NAMES);
+  const cookieEnv = pickEnv(source, profile.cookieEnv);
   const cookies = parseCookies(cookieEnv.value);
 
-  const uaEnv = pickEnv(source, UA_ENV_NAMES);
+  const uaEnv = pickEnv(source, profile.uaEnv);
 
-  const domains = stripQuotes(source.GLADOS_DOMAINS)
-    .split(',')
-    .map((s) => s.trim().replace(/\/+$/, ''))
-    .filter(Boolean);
+  // 自定义域名优先；没配就用站点档案里的候选域名
+  const customDomains = stripQuotes(pickEnv(source, profile.domainsEnv).value);
+  const domains = customDomains
+    ? customDomains.split(',').map(normalizeHost).filter(Boolean)
+    : profile.hosts.map((h) => 'https://' + h);
 
+  // 兑换档位：站点专属变量优先，其次共用的 EXCHANGE_PLAN，默认关闭
   const exchangePlan = (() => {
-    const raw = stripQuotes(source.EXCHANGE_PLAN || 'off').toLowerCase();
+    const raw = stripQuotes(
+      pickEnv(source, profile.exchangeEnv).value || source.EXCHANGE_PLAN || 'off'
+    ).toLowerCase();
     if (DISABLED_VALUES.has(raw)) return null;
     return Object.prototype.hasOwnProperty.call(EXCHANGE_PLANS, raw) ? raw : null;
   })();
@@ -235,15 +246,20 @@ function loadConfig(env) {
   const pushLevel = stripQuotes(source.PUSH_LEVEL || 'fail_only').toLowerCase();
 
   return {
+    site: profile,
     cookies: cookies,
     cookieEnvName: cookieEnv.name,
-    domains: domains.length > 0 ? domains : DEFAULT_DOMAINS.slice(),
-    checkinToken: stripQuotes(source.GLADOS_CHECKIN_TOKEN) || DEFAULT_CHECKIN_TOKEN,
+    domains: domains,
+    // token 默认按实际请求的域名推导（见 client.js）；
+    // 这里只在显式配置了覆盖值时才非空
+    checkinToken: stripQuotes(pickEnv(source, profile.tokenEnv).value),
+    // 自定义 Authorization 头；留空则只用 Cookie 鉴权
+    authorization: stripQuotes(pickEnv(source, profile.authEnv || []).value),
     userAgent: uaEnv.value || DEFAULT_USER_AGENT,
     userAgentIsDefault: !uaEnv.value,
-    timeoutMs: parseIntEnv(source.GLADOS_TIMEOUT_MS, 15000),
-    retries: parseIntEnv(source.GLADOS_RETRIES, 3),
-    retryDelayMs: parseIntEnv(source.GLADOS_RETRY_DELAY_MS, 20000),
+    timeoutMs: parseIntEnv(pickEnv(source, TIMEOUT_ENV).value, 15000),
+    retries: parseIntEnv(pickEnv(source, RETRIES_ENV).value, 3),
+    retryDelayMs: parseIntEnv(pickEnv(source, RETRY_DELAY_ENV).value, 20000),
     exchangePlan: exchangePlan,
     pushPlusToken: stripQuotes(source.PUSHPLUS_TOKEN),
     telegramBotToken: stripQuotes(source.TELEGRAM_BOT_TOKEN),
@@ -251,23 +267,42 @@ function loadConfig(env) {
     pushLevel: pushLevel,
     onlyFailPush: pushLevel !== 'all',
     verbose: parseBool(source.GLADOS_VERBOSE, false),
-    notifyTitlePrefix: stripQuotes(source.NOTIFY_TITLE) || 'GLaDOS 签到',
+    notifyTitlePrefix: stripQuotes(source.NOTIFY_TITLE),
   };
 }
 
+/**
+ * 读取所有「已配置 Cookie」的站点。
+ *
+ * 没配 Cookie 的站点直接跳过 —— 所以只用 GLaDOS 的用户，行为与之前完全一致。
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {object[]} 每项是一份 loadConfig 结果
+ */
+function loadSites(env) {
+  const source = env || process.env;
+  const configs = [];
+  for (const profile of SITES) {
+    const config = loadConfig(source, profile);
+    // 有 Cookie 或配了 Authorization 都算「已配置」——
+    // railgun 是令牌鉴权，可能压根没有 Cookie
+    if (config.cookies.length > 0 || config.authorization) configs.push(config);
+  }
+  return configs;
+}
+
 module.exports = {
-  DEFAULT_DOMAINS,
-  DEFAULT_CHECKIN_TOKEN,
   DEFAULT_USER_AGENT,
+  DEFAULT_SITE_KEY,
   EXCHANGE_PLANS,
-  COOKIE_ENV_NAMES,
-  UA_ENV_NAMES,
   normalizeCookie,
   parseCookies,
   parseBool,
   parseIntEnv,
   stripQuotes,
+  normalizeHost,
   pickEnv,
   diagnoseEnv,
   loadConfig,
+  loadSites,
 };

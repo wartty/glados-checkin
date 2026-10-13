@@ -1,10 +1,13 @@
-# GLaDOS 自动签到
+# GLaDOS / Railgun 自动签到
 
-面向 **青龙面板** 的 GLaDOS 每日自动签到脚本。纯 Node.js 实现，**零第三方依赖** —— 青龙面板不需要安装任何依赖包，Node 18+ 直接跑。
+面向 **青龙面板** 的自动签到脚本，同时支持 **GLaDOS** 与 **Railgun** 两个站点。两者后端是同一套 API，账号迁移到哪个站点就签到哪个。纯 Node.js 实现，**零第三方依赖** —— 青龙面板不需要安装任何依赖包，Node 18+ 直接跑。
 
+- ✅ 双站点支持：`glados.cloud` 与 `railgun.info`，各用自己的 Cookie 变量
+- ✅ 一份脚本：配了哪个站点的 Cookie 就签到哪个；只配一个，行为等同于单站点脚本
 - ✅ 多账号支持
 - ✅ 自动切换域名（`glados.cloud` / `glados.rocks` / `glados.network`）
-- ✅ 适配 2026 年新版 API（`token` 值 + 设备校验）
+- ✅ 签到 token 按实际域名自动推导
+- ✅ 适配设备校验（`code=4` device-mismatch）
 - ✅ 积分自动兑换会员天数（可选）
 - ✅ PushPlus / Telegram 推送
 - ✅ 单账号失败不影响其他账号
@@ -25,32 +28,45 @@ please checkin via https://glados.cloud
 
 本脚本对这两点都做了处理，并把 `device-mismatch` 单独识别出来给出明确提示。
 
+### 关于 Railgun
+
+GLaDOS 有部分账号会被迁移到新站点 **Railgun**（<https://railgun.info>）。两个站点共用一套后端：
+
+| | GLaDOS | Railgun |
+| --- | --- | --- |
+| 域名 | `glados.cloud` / `glados.rocks` / `glados.network` | `railgun.info` |
+| Cookie 变量 | `GLADOS_COOKIE` | `RAILGUN_COOKIE` |
+| 会话字段 | `gld:sess` + `gld:sess.sig` | `koa:sess` + `koa:sess.sig` |
+
+API 路径（`/api/user/checkin`、`/api/user/status`、`/api/user/points`、`/api/user/exchange`）与返回码完全一致，所以本脚本共用一份实现，只是按站点换域名和 Cookie。
+
+> **签到 token 恒等于当前域名**。这是站点前端自己的行为 —— `axios.post('/user/checkin', {token: location.hostname})` —— 所以脚本按实际请求的域名自动推导，**不需要配置**。
+
 ---
 
 ## 二、获取 Cookie 与 User-Agent
 
 ### 1. 获取 Cookie
 
-1. 浏览器打开 <https://glados.cloud> 并登录
+1. 浏览器打开站点并登录 —— GLaDOS 是 <https://glados.cloud>，Railgun 是 <https://railgun.info>
 2. 进入 **签到页面**（Console → Checkin）
 3. 按 `F12` 打开开发者工具，切到 **Network** 标签
-4. 点击页面上的**签到**按钮
-5. 在请求列表里找到名为 **`checkin`** 的请求，点开
+4. **刷新一下页面**（`F5`）—— 不需要点签到按钮
+5. 在请求列表里找到 **`status`** 请求（即 `/api/user/status`），点开
 6. 在 **Request Headers** 里找到 **`Cookie`** 字段，**整段复制**
 
-**⚠️ 必须包含 `gld:sess` 与 `gld:sess.sig`**
+> 用 `status` 请求而不是 `checkin`：刷新页面就能拿到，**不会误触发掉当天的签到**。
 
-2026-09 起站点把会话拆成了两个新字段，**两个都要有，缺一个就签不上**：
+**必须包含会话字段，两个站点的字段名不同：**
 
-| 字段 | 说明 |
-| --- | --- |
-| `gld:sess` | 会话 ID |
-| `gld:sess.sig` | 会话签名（漏掉它是最常见的复制错误） |
+| 站点 | 会话字段 | 说明 |
+| --- | --- | --- |
+| GLaDOS | `gld:sess` + `gld:sess.sig` | 2026-09 起启用。旧的 `koa:*` 即使没过期，调新版 API 也会返回 `没有权限`（`code=-2`） |
+| Railgun | `koa:sess` + `koa:sess.sig` | 仍是旧的命名 |
 
-旧的 `koa:sess` / `koa:sess.sig` **即使没过期，调新版 API 也会返回 `没有权限`（`code=-2`）**。
-好在完整 Cookie 里新旧字段是**同时下发**的，所以**整段复制即可，不要手工挑字段**。
+缺一个就签不上。好在完整 Cookie 里新老字段通常是**同时下发**的，所以**整段复制即可，不要手工挑字段**。
 
-复制后请确认值里同时出现 `gld:sess=` 和 `gld:sess.sig=`。形如：
+复制后确认值里同时出现该站点的两个字段，形如：
 
 ```
 gld:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; gld:sess.sig=abcdef123456; koa:sess=...; koa:sess.sig=...
@@ -61,7 +77,7 @@ gld:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; gld:sess.sig=abcdef123456; koa:sess=...; 
 
 ### 2. 获取 User-Agent（重要）
 
-GLaDOS 从 2026-09 起会校验**登录设备**：服务端从 `User-Agent` 解析出平台，与登录时的平台比对，不一致就返回 `code=4`（`Automated check-in detected`）。
+站点从 2026-09 起会校验**登录设备**：服务端从 `User-Agent` 解析出平台，与登录时的平台比对，不一致就返回 `code=4`（`Automated check-in detected`）。两个站点行为一致。
 
 **关键：只比对「平台」，不比对完整字符串。** 平台只有这几种取值：
 
@@ -73,11 +89,11 @@ Windows / macOS / Linux / Android / iOS / Bot / Other
 
 **怎么拿**（任选一种）：
 
-- **最简单**：用你**平时登录 GLaDOS 的那个浏览器**打开 `glados.cloud`，按 `F12` → **Console**，输入 `navigator.userAgent` 回车，复制输出的完整字符串
+- **最简单**：用你**平时登录该站点的那个浏览器**打开它，按 `F12` → **Console**，输入 `navigator.userAgent` 回车，复制输出的完整字符串
 - 地址栏输入 `chrome://version`，复制「用户代理」那一整行
-- 在 `checkin` 请求的 Request Headers 里复制 `User-Agent`
+- 在 `status` 请求的 Request Headers 里复制 `User-Agent`
 
-> 想确认自己登录用的是哪个平台：登录状态下访问 `https://glados.cloud/api/user/sessions`，看 `device` 字段。
+> 想确认自己登录用的是哪个平台：登录状态下访问 `<站点>/api/user/sessions`，看 `device` 字段。
 
 **要不要配？**
 
@@ -86,11 +102,11 @@ Windows / macOS / Linux / Android / iOS / Bot / Other
 | Windows 电脑的 Chrome / Edge | **不用配**，脚本默认值就是 Windows Chrome |
 | macOS / Linux / 手机 / iPad | **必须配**，否则会被判为自动签到 |
 
-**怎么填**：
+**怎么填** —— 变量名按站点选，GLaDOS 用 `GLADOS_USER_AGENT`，Railgun 用 `RAILGUN_USER_AGENT`：
 
 | 场景 | 写法 |
 | --- | --- |
-| 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`，值**直接粘贴**（输入框里不用加引号） |
+| 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`（或 `RAILGUN_USER_AGENT`），值**直接粘贴**（输入框里不用加引号） |
 | shell 临时运行 | **必须加引号**，否则会被 shell 截断 |
 
 ```bash
@@ -114,14 +130,18 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 ### 1. 添加环境变量
 
-青龙面板 → **环境变量** → **新建变量**：
+青龙面板 → **环境变量** → **新建变量**。**两个站点各有自己的 Cookie 变量**，配了哪个就签到哪个：
 
 | 变量名 | 值 | 必填 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | 上一步复制的完整 Cookie（须含 `gld:sess`） | ✅ |
-| `GLADOS_USER_AGENT` | 登录浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
+| `GLADOS_COOKIE` | glados.cloud 的完整 Cookie（须含 `gld:sess`） | 有 GLaDOS 账号时 |
+| `RAILGUN_COOKIE` | railgun.info 的完整 Cookie（须含 `koa:sess`） | 有 Railgun 账号时 |
+| `GLADOS_USER_AGENT` | 登录 glados 浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
+| `RAILGUN_USER_AGENT` | 登录 railgun 浏览器的 User-Agent | 非 Windows 登录时必填 |
 
-多账号：**多次添加** `GLADOS_COOKIE` 变量，或用 `&` / 换行在单个变量里分隔。
+两个都配就一次跑完两个站点；只配一个就是单站点。
+
+多账号：**多次添加**同一个变量，或用 `&` / 换行在单个变量里分隔。
 
 > **值直接粘贴，不要带引号** —— 青龙的输入框不会像 shell 那样剥引号，带上引号会变成值的一部分。
 > **变量名需符合青龙规范**：只能含字母、数字、下划线，且以字母或下划线开头 —— 不符合的名字会被青龙静默丢弃。
@@ -136,7 +156,7 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 | 字段 | 值 |
 | --- | --- |
-| 名称 | GLaDOS 签到 |
+| 名称 | GLaDOS / Railgun 签到 |
 | 命令 | `task glados-checkin/src/index.js` |
 | 定时规则 | `0 30 9 * * *` |
 
@@ -145,43 +165,141 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 >
 > `task` 是青龙执行脚本的标准写法；路径相对 `/ql/scripts`，子目录要写全。
 
+> 💡 后续如果账号**全部**迁移到 Railgun，不需要改代码：脚本会自动只签到配了 Cookie 的站点。真要清理时删掉 `GLADOS_*` 变量和 `sites.js` 里的 GLaDOS 档案即可。
+
 ---
 
-## 四、本地运行
+## 四、本地运行与验证
 
 ```bash
+# 单站点
 GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
+
+# 两个站点一起
+GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" \
+RAILGUN_COOKIE="koa:sess=aaa; koa:sess.sig=bbb" node src/index.js
 ```
 
 > shell 里赋值注意**加引号** —— Cookie 含分号空格、UA 含空格括号，不加引号会被 shell 截断。
 
+### 先做只读体检（推荐）
+
+第一次配置建议先加 `--dry-run`（或 `--check`）。它**只调 `status` / `points` 两个只读接口，不签到、不兑换、不推送** —— 所以不会消耗当天的签到。
+
+```bash
+GLADOS_COOKIE="..." RAILGUN_COOKIE="..." node src/index.js --dry-run
+```
+
+输出示例：
+
+```
+🔎 只读体检模式（不会签到，不消耗当天签到）
+📋 待体检站点: GLaDOS + Railgun
+🌐 GLaDOS  | 账号数 1 | 域名 https://glados.cloud, ...
+🌐 Railgun | 账号数 1 | 域名 https://railgun.info
+🔎 [GLaDOS] 账号 1 只读体检（不签到）
+✅ [GLaDOS] 账号 1 | 积分: 412 | 天数: 29 | Cookie 有效，体检通过（本次未签到）
+📊 体检完成: Cookie 可用 1/1
+```
+
+**这一步能确认什么：**
+
+| 检查项 | 说明 |
+| --- | --- |
+| 变量读到了 | 没读到会直接列环境诊断 |
+| Cookie 在该域名有效 | 通过则打印出**邮箱、积分、剩余天数** |
+| **账号属于哪个站点** | 迁移场景的关键 —— 报「账号不在 X」就说明该换另一个站点的变量 |
+| 请求头被接受 | Origin / Referer / User-Agent 都对上了才有响应 |
+
+**体检通过后**，去掉 `--dry-run` 跑正式签到即可。签到本身是幂等的 —— 重复跑只会显示「今日已签到」，没有副作用。
+
+> 唯一体检**验不出来**的是签到 token，因为只有 `checkin` 接口才用它。万一 token 值有问题，日志会直接给出服务端期望的域名，用 `<站点>_CHECKIN_TOKEN` 覆盖即可。
+
+### 不确定账号在哪个站点？
+
+用归属探测 —— 它把已配置的凭证**逐个拿到每个站点的每个域名**上试一次（只读）：
+
+```bash
+GLADOS_COOKIE="..." RAILGUN_COOKIE="..." node src/index.js --probe
+```
+
+```
+🍪 凭证 #1（来自 RAILGUN_COOKIE）
+   字段: koa:sess(268)  koa:sess.sig(43)
+   ❌ GLaDOS @ glados.cloud    -> code=-2  没有权限
+   ✅ Railgun @ railgun.info   -> code=0  邮箱 me@example.com  积分 412  剩余 29 天
+```
+
+出现 ✅ 的那一行，就是该账号当前所在的站点。凭证是按站点签发的，同一份在 A 站通过、在 B 站被拒都属正常。
+
 ---
 
-## 五、配置项
+## 五、通过青龙验证
 
-全部通过青龙面板的环境变量配置。除 `GLADOS_COOKIE` 外均可选。
+前面的 `--dry-run` 在青龙里同样可用 —— 临时把定时任务的命令改成：
+
+```
+task glados-checkin/src/index.js --dry-run
+```
+
+跑一次看日志，确认无误后**再改回**不带参数的命令。这样能在正式启用前先验证青龙的环境变量确实传进来了。
+
+---
+
+## 六、配置项
+
+全部通过青龙面板的环境变量配置。**至少要配一个站点的 Cookie**，其余均可选。
+
+### 站点相关
+
+两个站点对称，下面的 `XXX` 对 GLaDOS 是 `GLADOS`、对 Railgun 是 `RAILGUN`：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | — | **必填**。账号 Cookie，多账号用 `&` 或换行分隔。也认复数名 `GLADOS_COOKIES` |
-| `GLADOS_USER_AGENT` | Windows Chrome UA | 与登录时一致的浏览器 UA。**设备校验不通过时改这里**。也认 `GLADOS_UA` |
-| `GLADOS_DOMAINS` | `glados.cloud,glados.rocks,glados.network` | 候选域名，逗号分隔，按顺序尝试 |
-| `GLADOS_CHECKIN_TOKEN` | `glados.cloud` | 签到 token，仅官方再次改 API 时才需要动 |
-| `EXCHANGE_PLAN` | `off` | 自动兑换档位，见下 |
+| `XXX_COOKIE` | — | 该站点的账号 Cookie，多账号用 `&` 或换行分隔。也认复数名 `XXX_COOKIES` |
+| `XXX_USER_AGENT` | Windows Chrome UA | 该站点登录时的浏览器 UA。**设备校验不通过时改这里**。也认 `XXX_UA` |
+| `XXX_DOMAINS` | GLaDOS: `glados.cloud,glados.rocks,glados.network`<br>Railgun: `railgun.info` | 候选域名，逗号分隔，按顺序尝试 |
+| `XXX_CHECKIN_TOKEN` | 按域名自动推导 | 正常不用配，仅官方再次改 API 时才需要覆盖 |
+| `XXX_AUTHORIZATION` | — | 设备指纹，放在 `Authorization` 头里（**不是令牌**）。Railgun 建议配，见下 |
+| `XXX_EXCHANGE_PLAN` | 回落 `EXCHANGE_PLAN` | 该站点的自动兑换档位，见下 |
+
+### Railgun 的设备指纹（`RAILGUN_AUTHORIZATION`）
+
+railgun.info 的前端会在每个 `/api/user/...` 请求上带一个 `Authorization` 头，但它**不是登录令牌**，而是浏览器指纹：
+
+```js
+Ta = getCanvasFingerprint() + "-" + screen.height + "-" + screen.width
+```
+
+形如 `<画布哈希>-1080-1920`。服务端很可能把会话与这个指纹绑定 —— **只带 Cookie 不带指纹时，请求看起来像「另一台设备」**，可能因此被判为无权限（`code=-2`）。
+
+好消息：它**长期有效**（同一浏览器基本不变），不像会话那样会过期。从浏览器任意一个 `/api/user/...` 请求的 Request Headers 里复制即可，**不需要点签到按钮**：
+
+```bash
+RAILGUN_AUTHORIZATION=<画布哈希>-1080-1920
+```
+
+### 全局
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `EXCHANGE_PLAN` | `off` | 两个站点共用的自动兑换档位，见下 |
 | `PUSH_LEVEL` | `fail_only` | `fail_only` 仅失败时推送 / `all` 每次都推送 |
 | `PUSHPLUS_TOKEN` | — | PushPlus 微信推送 Token |
 | `TELEGRAM_BOT_TOKEN` | — | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | — | Telegram 接收者 Chat ID |
-| `GLADOS_TIMEOUT_MS` | `15000` | 单次请求超时（毫秒） |
-| `GLADOS_RETRIES` | `3` | 签到失败重试次数 |
-| `GLADOS_RETRY_DELAY_MS` | `20000` | 重试间隔（毫秒） |
-| `NOTIFY_TITLE` | `GLaDOS 签到` | 推送标题前缀 |
+| `CHECKIN_TIMEOUT_MS` | `15000` | 单次请求超时（毫秒）。也认旧名 `GLADOS_TIMEOUT_MS` |
+| `CHECKIN_RETRIES` | `3` | 签到失败重试次数。也认旧名 `GLADOS_RETRIES` |
+| `CHECKIN_RETRY_DELAY_MS` | `20000` | 重试间隔（毫秒）。也认旧名 `GLADOS_RETRY_DELAY_MS` |
+| `NOTIFY_TITLE` | 各站点名拼接 | 推送标题前缀 |
+
+> Cookie 失效（`code=-2`）和设备校验失败（`code=4`）都是**确定性失败，不会重试** —— 重试次数只对网络抖动等瞬时故障生效。
 
 ### 积分自动兑换
 
 签到攒够积分可自动换成会员天数，实现无感续期：
 
-| `EXCHANGE_PLAN` | 效果 |
+| 档位 | 效果 |
 | --- | --- |
 | `off`（默认） | 关闭自动兑换 |
 | `plan100` | 100 分 → 10 天 |
@@ -194,7 +312,7 @@ GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
 
 ---
 
-## 六、退出码
+## 七、退出码
 
 方便青龙/其他调度器判断结果：
 
@@ -205,7 +323,7 @@ GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
 
 ---
 
-## 七、常见问题
+## 八、常见问题
 
 **Q：青龙里提示「读不到 Cookie / 未配置 GLADOS_COOKIE」，但我确实配了？**
 
@@ -220,53 +338,78 @@ GLADOS_COOKIE="gld:sess=xxx; gld:sess.sig=yyy" node src/index.js
 另外两个高频坑：
 
 - **连引号一起粘进去了** —— 从文档里复制时把 `"` 也带上了。脚本会自动剥掉成对引号，但建议直接粘裸值。
-- **只复制了 `koa:*` 旧字段** —— 脚本会提示「没有 gld:sess」，见下面 `code=-2` 那条。
+- **会话字段不对** —— 脚本会提示缺了哪个字段：GLaDOS 要 `gld:sess`，Railgun 要 `koa:sess`。
 
 **Q：日志显示 `please checkin via https://glados.cloud` ？**
-签到 token 失效了。GLaDOS 又改了 API 值，把 `GLADOS_CHECKIN_TOKEN` 设成日志里提示的那个域名。
+签到 token 失效了，站点又改了 API 值。把 `GLADOS_CHECKIN_TOKEN` 设成日志里提示的那个域名即可。
 
 **Q：日志显示 `设备校验失败 (device-mismatch)`？**
 这是 2026-09 新增的设备校验。脚本会同时打印服务端返回的 `loginDevice`（登录平台）与 `currentDevice`（本次请求被识别成的平台）。
-把 `GLADOS_USER_AGENT` 改成 `loginDevice` 对应的平台即可 —— **只比对平台，版本号无所谓**。
+把对应站点的 UA 变量改成 `loginDevice` 对应的平台即可 —— **只比对平台，版本号无所谓**：
+GLaDOS 改 `GLADOS_USER_AGENT`，Railgun 改 `RAILGUN_USER_AGENT`。
 注意此时 `status` / `points` 接口是正常的，别误以为是 Cookie 问题。详见第二节 2。
 
 **Q：`Cookie 失效或无权限 (code=-2)`？**
 两种可能：
-1. **复制漏了字段** —— 确认 Cookie 里同时有 `gld:sess=` 和 `gld:sess.sig=`。2026-09 起新增的这两个字段缺一不可，只有旧的 `koa:*` 会一直报这个错；
-2. **Cookie 过期** —— 重新走第二步获取。GLaDOS 的 Cookie 大约 30 天失效。
+1. **复制漏了字段** —— GLaDOS 需要 `gld:sess=` 与 `gld:sess.sig=`，Railgun 需要 `koa:sess=` 与 `koa:sess.sig=`，缺一个都会一直报这个错。回到第二节，从 `status` 请求里**整段复制**；
+2. **Cookie 过期** —— 重新走第二步获取。Cookie 大约 30 天失效。
+
+> 这个错误是确定性的，脚本**不会重试**，直接判失败。
+
+**Q：不确定账号到底在 GLaDOS 还是 Railgun？**
+用只读体检：把同一个 Cookie 分别填到 `GLADOS_COOKIE` 和 `RAILGUN_COOKIE`，各跑一次 `--dry-run`（见第四节）。
+能读出邮箱、积分、天数的那一边，就是账号所在的站点 —— 过程不消耗签到。
+
+**Q：账号在 Railgun，但我只配了 glados 的 Cookie？**
+脚本只签到**配了 Cookie 的站点**，不会拿 glados 的 Cookie 去试 railgun。账号在哪个站点，就配哪个站点的 Cookie 变量。
 
 **Q：`今日已签到` 算失败吗？**
-不算。这表示今天已经签到过了，脚本会返回退出码 `0`。
+不算。这表示今天已经签到过了，脚本会返回退出码 `0`。两个站点的判定方式不同：
+
+| 站点 | 重复签到的返回 |
+| --- | --- |
+| GLaDOS | `code=1` + `Checkin Repeats!` |
+| Railgun | `code=3`（`Daily limit reached`） |
+
+> 注意 GLaDOS 的 `code=1` 是**双关的** —— 「已经签过」和「token 错误」都回 1，所以脚本必须结合 message 才能区分。只看返回码会把 token 失效误报成「今日已签到」，从而静默漏签。
+
+**Q：日志显示 `请求过快被限流`？**
+Railgun 回了 `code=2`（`Too fast, please wait`）。这是可恢复的，脚本会按 `CHECKIN_RETRY_DELAY_MS` 重试；仍失败就稍后再跑一次。
 
 **Q：需要装依赖吗？**
 不需要。脚本只用 Node 内置的 `fetch`，青龙面板的「依赖管理」不用管。只需要 Node 18 以上版本。
 
 **Q：想跑多个账号？**
-`GLADOS_COOKIE` 里用 `&` 或换行分隔多个 Cookie 即可，脚本会依次处理。
+在对应站点的 Cookie 变量里用 `&` 或换行分隔即可，脚本会依次处理。
 换行分隔更安全 —— Cookie 值本身可能含 `&`。
 
 ---
 
-## 八、项目结构
+## 九、项目结构
 
 ```
 glados-checkin/
 ├── src/
-│   ├── index.js      # 入口：编排签到流程、重试、汇总
+│   ├── index.js      # 入口：解析参数、汇总、推送
+│   ├── checkin.js    # 签到流程：重试策略、单账号处理、自动兑换
+│   ├── diagnose.js   # 排查工具：环境诊断、Cookie 自证、归属探测
+│   ├── sites.js      # 站点档案（域名、变量名、会话字段）
 │   ├── config.js     # 环境变量解析与 Cookie 归一化
-│   ├── glados.js     # API 客户端（域名回退、响应分类）
+│   ├── client.js     # API 客户端（token 推导、域名回退、响应分类）
 │   └── notify.js     # 推送（PushPlus / Telegram）
 ├── .gitignore
 ├── LICENSE
 └── package.json
 ```
 
+两个站点共用 `client.js` 与 `checkin.js` —— 协议一致，差异全部集中在 `sites.js`。
+
 ---
 
-## 九、免责声明
+## 十、免责声明
 
 本脚本仅用于自动化**你自己账号**的每日签到，避免手动操作。
-请遵守 GLaDOS 的服务条款。因使用本脚本产生的任何后果由使用者自行承担。
+请遵守 GLaDOS / Railgun 的服务条款。因使用本脚本产生的任何后果由使用者自行承担。
 
 ## License
 

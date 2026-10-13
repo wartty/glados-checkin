@@ -1,7 +1,7 @@
 {
   "name": "glados-checkin",
   "version": "1.0.0",
-  "description": "GLaDOS 自动签到脚本 —— 青龙面板 / 通用 Node 环境，零依赖",
+  "description": "GLaDOS / Railgun 自动签到脚本 —— 青龙面板 / 通用 Node 环境，零依赖",
   "main": "src/index.js",
   "bin": {
     "glados-checkin": "src/index.js"
@@ -15,6 +15,7 @@
   },
   "keywords": [
     "glados",
+    "railgun",
     "checkin",
     "qinglong",
     "签到",
