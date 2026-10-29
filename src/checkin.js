@@ -38,8 +38,8 @@ function isDeterministicFailure(data) {
  *
  * 三种情况立即返回，不浪费重试次数：
  *   1. 刚签到成功
- *   2. 今天已经签过了（本次没签成，但不是失败）
- *   3. 确定性失败（凭证失效 / 设备校验）
+ *   2. 今天已经签过了（本次没签成，但不是失败；依据随结果返回，由结果行输出）
+ *   3. 确定性失败（凭证失效 / 设备校验 / token 失效）
  *
  * @returns {Promise<{result: object|null, success: boolean, alreadyCheckedIn?: boolean, basis?: string}>}
  */
@@ -52,19 +52,16 @@ async function checkinWithRetry(client, retries, retryDelayMs, log) {
 
     if (!last.ok) {
       if (i < attempts) {
-        log(
-          '⚠️ 签到第 ' + i + '/' + attempts + ' 次未成功，' +
-            Math.round(retryDelayMs / 1000) + ' 秒后重试'
-        );
+        log('第 ' + i + '/' + attempts + ' 次未成功，' + Math.round(retryDelayMs / 1000) + ' 秒后重试');
         await sleep(retryDelayMs);
       }
       continue;
     }
 
-    // 今天已经签过了 —— 先看服务端文案（GLaDOS 走这条）
+    // 今天已经签过了 —— 先看服务端文案（GLaDOS 走这条）。
+    // 不在这里打日志：依据会随结果返回，由结果行统一输出，避免重复。
     if (isRepeatByMessage(last.data)) {
       const basis = '服务端返回「' + String(last.data.message || '').trim() + '」';
-      log('ℹ️ 账号今日已完成签到（' + basis + '），本次不重复签到');
       return { result: last, success: true, alreadyCheckedIn: true, basis: basis };
     }
 
@@ -72,18 +69,13 @@ async function checkinWithRetry(client, retries, retryDelayMs, log) {
       return { result: last, success: true };
     }
 
-    // token 不对是确定性问题：先于「已签到」判定拦下，避免被今天已签到掩盖
+    // token 不对是确定性问题：先于「已签到」判定拦下，避免被今天已签到掩盖。
+    // 不打跳过日志 —— 结果行会带出失败原因，避免重复。
     if (isTokenOutdated(last.data)) {
-      log('⛔ 签到 token 已失效（' + String(last.data.message || '').trim() + '），重试无意义');
       return { result: last, success: false };
     }
 
     if (isDeterministicFailure(last.data)) {
-      log(
-        last.data.code === CODE.DEVICE_MISMATCH
-          ? '⛔ 设备校验未通过，重试无意义，跳过'
-          : '⛔ 凭证失效或无权限，重试无意义，跳过'
-      );
       return { result: last, success: false };
     }
 
@@ -91,15 +83,11 @@ async function checkinWithRetry(client, retries, retryDelayMs, log) {
     // 靠 checkedIn / 历史日期确认。否则每天第二次运行都会误报失败。
     const check = await client.hasCheckedInToday();
     if (check.done) {
-      log('ℹ️ 账号今日已完成签到（' + check.basis + '），本次不重复签到');
       return { result: last, success: true, alreadyCheckedIn: true, basis: check.basis };
     }
 
     if (i < attempts) {
-      log(
-        '⚠️ 签到第 ' + i + '/' + attempts + ' 次未成功，' +
-          Math.round(retryDelayMs / 1000) + ' 秒后重试'
-      );
+      log('第 ' + i + '/' + attempts + ' 次未成功，' + Math.round(retryDelayMs / 1000) + ' 秒后重试');
       await sleep(retryDelayMs);
     }
   }
@@ -186,30 +174,36 @@ function compactJson(value) {
 
 /**
  * 积分达标时自动兑换会员天数。
- * @returns {Promise<string>} 用于推送的说明文本
+ *
+ * @returns {Promise<{status: 'ok'|'fail'|'skip', text: string}>}
+ *   status 用于推送决策：fail 时即使 PUSH_LEVEL=fail_only 也会推送；
+ *   skip（积分不足等）不打扰。text 进推送的「自动兑换」一行。
  */
 async function autoExchange(client, planId, log) {
   const plan = EXCHANGE_PLANS[planId];
-  if (!plan) return '⏭️ 未配置有效兑换档位';
+  if (!plan) return { status: 'skip', text: '未配置有效兑换档位' };
 
   const points = Number.parseInt(client.points, 10);
-  if (!Number.isFinite(points)) return '⚠️ 兑换跳过（积分未知）';
+  if (!Number.isFinite(points)) return { status: 'fail', text: '兑换跳过（积分未知）' };
   if (points < plan.points) {
-    return '⏭️ 积分不足 (' + points + '/' + plan.points + ')，攒够自动兑换 ' + plan.days + ' 天';
+    return {
+      status: 'skip',
+      text: '积分不足 (' + points + '/' + plan.points + ')，攒够自动兑换 ' + plan.days + ' 天',
+    };
   }
 
   const res = await client.exchange(planId);
   if (res.ok && res.data && res.data.code === CODE.SUCCESS) {
-    log('🎁 自动兑换成功: ' + plan.points + '分 → +' + plan.days + '天');
+    log('自动兑换成功: ' + plan.points + '分 → +' + plan.days + '天');
     // 兑换会扣积分、加天数，刷新后推送里才是最新数据
     await client.fetchStatus();
     await client.fetchPoints();
-    return '🎁 兑换成功 +' + plan.days + ' 天 (消耗 ' + plan.points + ' 分)';
+    return { status: 'ok', text: '兑换成功 +' + plan.days + ' 天 (消耗 ' + plan.points + ' 分)' };
   }
 
   const reason = res.ok && res.data ? res.data.message : (res.error || '网络错误');
-  log('⚠️ 自动兑换失败: ' + reason);
-  return '⚠️ 兑换失败 (' + reason + ')';
+  log('自动兑换失败: ' + reason);
+  return { status: 'fail', text: '兑换失败 (' + reason + ')' };
 }
 
 /** 构造一个账号的结果条目。 */
@@ -239,6 +233,9 @@ async function processAccount(cookie, index, config, log, options) {
   const opts = options || {};
   const site = config.site;
 
+  // 本账号的所有日志都带上站点与序号，多账号时才分得清归属
+  const plog = (msg) => log('[' + site.label + ' 账号' + index + '] ' + msg);
+
   const client = new CheckinClient({
     cookie: cookie,
     domains: config.domains,
@@ -246,18 +243,15 @@ async function processAccount(cookie, index, config, log, options) {
     authorization: config.authorization,
     userAgent: config.userAgent,
     timeoutMs: config.timeoutMs,
-    logger: log,
+    logger: plog,
     debug: opts.debug,
   });
 
   let checkinResult = null;
   let already = null;
 
-  if (opts.dryRun) {
-    log('🔎 [' + site.label + '] 账号 ' + index + ' 只读体检（不签到）');
-  } else {
-    log('▶️ [' + site.label + '] 账号 ' + index + ' 开始签到');
-    const outcome = await checkinWithRetry(client, config.retries, config.retryDelayMs, log);
+  if (!opts.dryRun) {
+    const outcome = await checkinWithRetry(client, config.retries, config.retryDelayMs, plog);
     checkinResult = outcome.result;
     if (outcome.alreadyCheckedIn) already = { basis: outcome.basis || '' };
   }
@@ -270,9 +264,9 @@ async function processAccount(cookie, index, config, log, options) {
   if (opts.dryRun) {
     // 体检模式：能读到账号信息就说明该站点接受了这份凭证
     described = client.hasAccountInfo()
-      ? { message: '凭证有效，体检通过（本次未签到）', success: true }
+      ? { message: '体检通过，凭证有效（本次未签到）', success: true }
       : {
-          message: '该站点拒绝此凭证 (code=-2) —— 可能已失效，或账号不在 ' + site.label,
+          message: '体检失败：该站点拒绝此凭证 (code=-2)，可能已失效或账号不在 ' + site.label,
           success: false,
         };
   } else if (already) {
@@ -287,18 +281,23 @@ async function processAccount(cookie, index, config, log, options) {
 
   const account = buildAccount(config, index, described, client);
 
-  log(
-    (described.success ? '✅' : '❌') +
-      ' [' + site.label + '] 账号 ' + index +
-      ' | 积分: ' + client.points +
-      ' | 天数: ' + client.leftDays +
-      ' | ' + described.message
+  // 结果一行带全：状态描述 | 积分（含变化）| 剩余天数
+  const changeSuffix =
+    client.pointsChange && client.pointsChange !== UNKNOWN
+      ? ' (' + client.pointsChange + ')'
+      : '';
+  plog(
+    described.message +
+      ' | 积分 ' + client.points + changeSuffix +
+      ' | 剩余 ' + client.leftDays + ' 天'
   );
 
   // 自动兑换在签到之后，让当天新赚的积分也计入阈值。
   // 体检模式不兑换 —— 否则「验证」本身就会消耗掉积分。
   if (!opts.dryRun && config.exchangePlan && described.success) {
-    account.exchangeResult = await autoExchange(client, config.exchangePlan, log);
+    const exchange = await autoExchange(client, config.exchangePlan, plog);
+    account.exchangeResult = exchange.text;
+    account.exchangeStatus = exchange.status;
   }
 
   return account;
@@ -327,7 +326,7 @@ async function runCheckin(sites, options) {
         accounts.push(await processAccount(targets[i], i + 1, config, log, opts));
       } catch (err) {
         const detail = err && err.message ? err.message : String(err);
-        log('❌ [' + config.site.label + '] 账号 ' + (i + 1) + ' 处理异常: ' + detail);
+        log('[' + config.site.label + ' 账号' + (i + 1) + '] 处理异常: ' + detail);
         accounts.push(
           buildAccount(config, i + 1, { message: '异常: ' + detail, success: false }, null)
         );

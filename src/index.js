@@ -49,36 +49,29 @@ function parseFlags(argv, env) {
   };
 }
 
-/** 打印单个站点的配置摘要。 */
+/** 打印单个站点的配置摘要（一行；警告与提示单独成行，仅在有话可说时出现）。 */
 function logSiteSummary(config, log) {
   const site = config.site;
   const accountCount = config.cookies.length > 0 ? config.cookies.length : 1;
 
-  log('🌐 ' + site.label + ' | 账号数 ' + accountCount + ' | 域名 ' + config.domains.join(', '));
+  const parts = ['账号 ' + accountCount, config.domains.join(',')];
 
   const authParts = [];
   if (config.cookies.length > 0) authParts.push('Cookie');
-  if (config.authorization) {
-    authParts.push('Authorization 头（已配置，' + config.authorization.length + ' 字符）');
-  }
-  log('   鉴权: ' + authParts.join(' + '));
+  if (config.authorization) authParts.push('指纹(' + config.authorization.length + '字符)');
+  parts.push('鉴权 ' + authParts.join('+'));
 
-  if (config.authorization && site.authNote) {
-    log('         ' + site.authNote);
-  } else if (!config.authorization && site.authEnv && site.authEnv.length > 0 && site.authNote) {
-    log('   💡 未配 ' + site.authEnv[0] + ' —— ' + site.authNote);
+  // UA 只对 GLaDOS 有意义（它据此做设备校验）；Railgun 靠指纹识别设备，不列
+  if (!site.uaOptional) {
+    parts.push('UA ' + (config.userAgentIsDefault ? '默认' : '自定义'));
   }
 
-  // UA 只对 GLaDOS 是必需的（它据此做设备校验）；Railgun 靠指纹识别设备
-  if (config.userAgentIsDefault && site.uaOptional) {
-    log('   User-Agent: 内置默认（该站点不依赖 UA 识别设备）');
-  } else {
-    log(
-      '   User-Agent(' +
-        (config.userAgentIsDefault ? '内置默认' : '环境变量') +
-        '): ' + config.userAgent
-    );
+  if (config.exchangePlan) {
+    const plan = EXCHANGE_PLANS[config.exchangePlan];
+    parts.push('兑换 ' + config.exchangePlan + '(' + plan.points + '分→' + plan.days + '天)');
   }
+
+  log(site.label + ': ' + parts.join(' | '));
 
   // 会话字段提示：命中任一候选字段就不提示，避免误报
   const expected = site.sessionFields || [];
@@ -86,17 +79,16 @@ function logSiteSummary(config, log) {
     const missing = config.cookies.filter((c) => c && !expected.some((f) => c.includes(f)));
     if (missing.length > 0) {
       log(
-        '   ⚠️ 有 ' + missing.length + '/' + config.cookies.length +
-          ' 个凭证里没有 ' + expected.join(' 或 ')
+        '  警告: ' + missing.length + '/' + config.cookies.length +
+          ' 个凭证缺少 ' + expected.join(' 或 ') + ' —— ' + site.sessionHint +
+          (site.sessionHowTo ? '；' + site.sessionHowTo : '')
       );
-      log('      ' + site.sessionHint);
-      if (site.sessionHowTo) log('      ' + site.sessionHowTo);
     }
   }
 
-  if (config.exchangePlan) {
-    const plan = EXCHANGE_PLANS[config.exchangePlan];
-    log('   🎁 自动兑换已启用: ' + plan.points + '分 → ' + plan.days + '天');
+  // 指纹缺失时的提示（配置了就不啰嗦）
+  if (!config.authorization && site.authEnv && site.authEnv.length > 0 && site.authNote) {
+    log('  提示: 建议配置 ' + site.authEnv[0] + ' —— ' + site.authNote);
   }
 }
 
@@ -104,13 +96,11 @@ function logSiteSummary(config, log) {
 async function reportResults(sites, accounts, allOk, log) {
   // 推送设置是全局的，取任一站点配置即可
   const settings = sites[0];
-  const exchangeFailed = accounts.some(
-    (a) => a.exchangeResult && a.exchangeResult.startsWith('⚠️')
-  );
+  const exchangeFailed = accounts.some((a) => a.exchangeStatus === 'fail');
   const shouldPush = !settings.onlyFailPush || !allOk || exchangeFailed;
 
   if (!shouldPush) {
-    log('ℹ️ PUSH_LEVEL=fail_only 且全部成功，跳过推送');
+    log('推送已跳过 (fail_only 且全部成功)');
     return;
   }
 
@@ -130,29 +120,32 @@ async function main() {
 
   const sites = loadSites(process.env);
 
-  log(flags.dryRun ? '🔎 只读体检模式（不会签到，不消耗当天签到）' : '🚀 签到启动');
-  if (flags.debug) log('🐞 调试模式：会打印每次请求的原始响应（不含凭证）');
-
   if (sites.length === 0) {
-    log('❌ 没有读到任何凭证 —— GLADOS_COOKIE / RAILGUN_COOKIE 都不存在或为空');
+    log('未读到任何凭证 —— GLADOS_COOKIE / RAILGUN_COOKIE 均为空');
     log('');
     reportEnvDiagnosis(log, ['GLADOS_COOKIE', 'RAILGUN_COOKIE']);
     return 1;
   }
 
-  // 自证：确认脚本没有改动用户粘进来的 Cookie
+  const totalAccounts = sites.reduce((n, c) => n + (c.cookies.length || 1), 0);
+  log(
+    (flags.dryRun ? '只读体检' : '签到启动') + ': ' +
+      sites.map((c) => c.site.label).join(' + ') +
+      ' | 账号 ' + totalAccounts
+  );
+  if (flags.debug) log('调试模式: 将打印原始响应（不含凭证）');
+
+  // 自证：确认脚本没有改动用户粘进来的 Cookie；顺带打印完整 UA
   if (flags.debug) {
     for (const config of sites) {
       logCookieDiagnosis(process.env, config, log);
     }
+    for (const config of sites) {
+      log('UA [' + config.site.label + ']: ' + config.userAgent);
+    }
     log('');
   }
 
-  log(
-    '📋 待' + (flags.dryRun ? '体检' : '签到') + '站点: ' +
-      sites.map((c) => c.site.label).join(' + ')
-  );
-  log('');
   for (const config of sites) {
     logSiteSummary(config, log);
   }
@@ -168,13 +161,13 @@ async function main() {
   const allOk = successCount === accounts.length;
 
   log(
-    '📊 ' + (flags.dryRun ? '体检完成: 凭证可用 ' : '完成: 成功 ') +
+    (flags.dryRun ? '体检完成: 凭证可用 ' : '完成: 成功 ') +
       successCount + '/' + accounts.length
   );
 
   // 体检只是排查手段，不发推送
   if (flags.dryRun) {
-    log('ℹ️ 体检模式不发推送。去掉 --dry-run 即可正常签到。');
+    log('体检模式不发推送；去掉 --dry-run 即为正式签到');
     return allOk ? 0 : 1;
   }
 

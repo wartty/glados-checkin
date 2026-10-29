@@ -22,7 +22,7 @@ function escapeHtml(input) {
 /**
  * 汇总各账号结果，生成推送正文（HTML）。
  *
- * @param {Array<{site?: string, email: string, points: string, pointsChange: string, leftDays: string, message: string, success: boolean, exchangeResult?: string, exchangeInfo?: string}>} accounts
+ * @param {Array<{site?: string, email: string, points: string, pointsChange: string, leftDays: string, message: string, success: boolean, exchangeResult?: string, exchangeStatus?: string, exchangeInfo?: string}>} accounts
  * @param {{titlePrefix?: string, timestamp?: string}} [options]
  * @returns {{title: string, html: string, text: string}}
  */
@@ -41,9 +41,8 @@ function buildReport(accounts, options) {
   const siteTag = (a) => (showSite && a.site ? '[' + escapeHtml(a.site) + '] ' : '');
 
   const blocks = accounts.map((a, index) => {
-    const icon = a.success ? '✅' : '❌';
     const lines = [
-      '<h3>' + icon + ' ' + siteTag(a) + '账号 ' + (index + 1) + ' · ' + escapeHtml(a.email) + '</h3>',
+      '<h3>' + siteTag(a) + '账号 ' + (index + 1) + ' · ' + escapeHtml(a.email) + '</h3>',
       '<ul>',
       '<li><b>签到结果:</b> ' + escapeHtml(a.message) + '</li>',
       '<li><b>当前积分:</b> ' + escapeHtml(a.points) +
@@ -71,8 +70,7 @@ function buildReport(accounts, options) {
   // 纯文本版本，给 Telegram 或日志兜底
   const text = accounts
     .map((a, index) => {
-      const icon = a.success ? '✅' : '❌';
-      let s = icon + ' ' + siteTag(a) + '账号 ' + (index + 1) + ' ' + a.email + '\n';
+      let s = siteTag(a) + '账号 ' + (index + 1) + ' ' + a.email + '\n';
       s += '签到结果: ' + a.message + '\n';
       s += '当前积分: ' + a.points + '\n';
       s += '剩余天数: ' + a.leftDays + ' 天';
@@ -101,13 +99,13 @@ async function pushPlus(token, title, html, logger) {
     const payload = await resp.json();
     const code = payload && payload.code;
     if (code !== undefined && code !== 0 && code !== 200) {
-      log('⚠️ PushPlus 推送失败: ' + (payload.msg || 'code=' + code));
+      log('PushPlus 推送失败: ' + (payload.msg || 'code=' + code));
       return false;
     }
-    log('✅ PushPlus 推送成功');
+    log('PushPlus 推送成功');
     return true;
   } catch (err) {
-    log('⚠️ PushPlus 推送异常: ' + (err && err.message ? err.message : String(err)));
+    log('PushPlus 推送异常: ' + (err && err.message ? err.message : String(err)));
     return false;
   }
 }
@@ -128,13 +126,13 @@ async function telegram(botToken, chatId, title, text, logger) {
       signal: AbortSignal.timeout(15000),
     });
     if (!resp.ok) {
-      log('⚠️ Telegram 推送失败: HTTP ' + resp.status);
+      log('Telegram 推送失败: HTTP ' + resp.status);
       return false;
     }
-    log('✅ Telegram 推送成功');
+    log('Telegram 推送成功');
     return true;
   } catch (err) {
-    log('⚠️ Telegram 推送异常: ' + (err && err.message ? err.message : String(err)));
+    log('Telegram 推送异常: ' + (err && err.message ? err.message : String(err)));
     return false;
   }
 }
@@ -154,7 +152,7 @@ async function dispatch(config, report, logger) {
     tasks.push(telegram(config.telegramBotToken, config.telegramChatId, report.title, report.text, log));
   }
   if (tasks.length === 0) {
-    log('ℹ️ 未配置推送渠道，跳过通知');
+    log('未配置推送渠道，跳过推送');
     return;
   }
   await Promise.allSettled(tasks);

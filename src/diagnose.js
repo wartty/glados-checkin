@@ -42,31 +42,31 @@ function formatCookieFields(cookie) {
 function reportEnvDiagnosis(log, expectedEnvNames) {
   const diag = diagnoseEnv(process.env);
 
-  log('🔍 环境诊断（只列变量名与长度，不打印值）:');
-  log('   环境变量总数: ' + diag.total);
+  log('环境诊断（只列变量名与长度，不打印值）');
+  log('环境变量总数: ' + diag.total);
 
   if (diag.interesting.length > 0) {
     for (const item of diag.interesting) {
       // JSON.stringify 能把尾随空格等不可见字符显示出来
-      log('   ' + JSON.stringify(item.name) + '  值长度=' + item.length);
+      log('  ' + JSON.stringify(item.name) + ' 值长度=' + item.length);
     }
-    log('   ↑ 名字若与 ' + expectedEnvNames.join(' / ') + ' 有差异（尾随空格 / 大小写 / 单复数），请改成一致');
-    log('     值长度为 0 说明变量建了但值没保存进去');
+    log(
+      '提示: 名字应与 ' + expectedEnvNames.join(' / ') + ' 一致（检查尾随空格/大小写/单复数）；' +
+        '长度为 0 说明值没保存进去'
+    );
     return;
   }
 
-  log('   ⚠️ 没有任何变量名包含 GLADOS / RAILGUN / COOKIE / USER_AGENT');
-  log('   下面是当前全部变量名，请在列表中查找你的变量：');
-  log('');
+  log('未发现任何相关变量名（GLADOS / RAILGUN / COOKIE / USER_AGENT）');
+  log('当前全部变量名:');
   for (const name of diag.names) {
-    log('     ' + JSON.stringify(name));
+    log('  ' + JSON.stringify(name));
   }
-  log('');
-  log('   若列表中找不到，请检查：');
-  log('   ① 该变量在青龙「环境变量」里是否处于【启用】状态');
-  log('   ② 变量名是否符合青龙规范：只能含字母/数字/下划线，且以字母或下划线开头');
-  log('      （不符合规范的名字会被青龙静默丢弃，但面板里照常显示）');
-  log('   ③ 变量是否加在了当前这个青龙实例上');
+  log('若列表中没有你的变量，请检查：');
+  log('  1) 变量在青龙「环境变量」里是否处于启用状态');
+  log('  2) 变量名是否符合青龙规范（字母/数字/下划线，以字母或下划线开头；');
+  log('     不合规的名字会被青龙静默丢弃，但面板里照常显示）');
+  log('  3) 变量是否加在当前这个青龙实例上');
 }
 
 /**
@@ -81,16 +81,12 @@ function logCookieDiagnosis(env, config, log) {
   const normalized = config.cookies[0] || '';
   const sameLength = raw.trim().length === normalized.length;
 
-  log('🍪 Cookie 解析诊断 [' + config.site.label + ']');
-  log('   环境变量原始长度: ' + raw.trim().length);
-  log('   实际发出长度:     ' + normalized.length);
   log(
-    '   ' +
-      (sameLength
-        ? '✅ 长度一致，Cookie 未被脚本改动'
-        : '⚠️ 长度不一致 —— 脚本对 Cookie 做了处理，请把这条发给作者')
+    'Cookie 诊断 [' + config.site.label + ']: 原始 ' + raw.trim().length +
+      ' 字符 -> 发出 ' + normalized.length + ' 字符（' +
+      (sameLength ? '一致，未被脚本改动' : '不一致！脚本做了处理，请反馈') + '）'
   );
-  log('   字段: ' + formatCookieFields(normalized));
+  log('  字段: ' + formatCookieFields(normalized));
 }
 
 /**
@@ -113,11 +109,11 @@ async function probeSites(env, log) {
   }
 
   if (cookies.size === 0) {
-    log('❌ 没有读到任何 Cookie —— 先配 GLADOS_COOKIE 或 RAILGUN_COOKIE');
+    log('没有读到任何 Cookie —— 先配置 GLADOS_COOKIE 或 RAILGUN_COOKIE');
     return 1;
   }
 
-  log('🔍 凭证归属探测（只读，不签到、不兑换）');
+  log('凭证归属探测（只读，不签到、不兑换）');
   log('');
 
   let anyOk = false;
@@ -125,8 +121,7 @@ async function probeSites(env, log) {
 
   for (const [cookie, sourceName] of cookies) {
     index += 1;
-    log('🍪 凭证 #' + index + '（来自 ' + sourceName + '）');
-    log('   字段: ' + formatCookieFields(cookie));
+    log('凭证 #' + index + '（来自 ' + sourceName + '）字段: ' + formatCookieFields(cookie));
 
     for (const config of allConfigs) {
       for (const domain of config.domains) {
@@ -144,17 +139,16 @@ async function probeSites(env, log) {
         if (accepted) anyOk = true;
 
         log(
-          '   ' + (accepted ? '✅' : '❌') + ' ' +
+          '  ' + (accepted ? '[通过]' : '[拒绝]') + ' ' +
             (config.site.label + ' @ ' + hostnameOf(domain)).padEnd(30) +
-            ' -> ' + describeProbe(res, client, accepted)
+            ' ' + describeProbe(res, client, accepted)
         );
       }
     }
     log('');
   }
 
-  log('说明：凭证按站点签发 —— 同一份在各站点表现不同是正常的。');
-  log('      出现 ✅ 的那一行，就是该账号当前所在的站点。');
+  log('说明: 凭证按站点签发，同一份在各站点表现不同属正常；[通过] 的行即账号所在站点。');
   return anyOk ? 0 : 1;
 }
 

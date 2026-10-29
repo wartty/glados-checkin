@@ -267,24 +267,22 @@ class CheckinClient {
         response = await fetch(url, init);
       } catch (err) {
         lastError = domain + ' 请求失败: ' + (err && err.message ? err.message : String(err));
-        this.logger('⚠️ ' + lastError);
+        this.logger(lastError);
         continue;
       }
 
       const text = await response.text();
 
-      // --debug：打印原始响应，排查时最有用（不含 Cookie）
+      // --debug：打印原始响应，排查时最有用（不含凭证）
       if (this.debug) {
         const preview = text.length > 600 ? text.slice(0, 600) + '…(截断)' : text;
-        this.logger(
-          '🐞 ' + method + ' ' + url + ' -> HTTP ' + response.status + ' | ' + preview
-        );
+        this.logger('[debug] ' + method + ' ' + url + ' -> HTTP ' + response.status + ' | ' + preview);
       }
 
       // 网关拦截页等情况会返回 HTML，这里给出可读提示
       if (!response.ok) {
         lastError = domain + ' HTTP ' + response.status;
-        this.logger('⚠️ ' + lastError);
+        this.logger(lastError);
         continue;
       }
 
@@ -294,7 +292,7 @@ class CheckinClient {
       } catch {
         const preview = text.slice(0, 200).replace(/\s+/g, ' ').trim();
         lastError = domain + ' 返回非 JSON: ' + (preview || '(空响应)');
-        this.logger('⚠️ ' + lastError);
+        this.logger(lastError);
         continue;
       }
 
@@ -355,8 +353,8 @@ class CheckinClient {
             const need = Number.parseInt(item.points, 10) || 0;
             const days = item.days === undefined ? '?' : item.days;
             return Number.isFinite(pts) && pts >= need
-              ? '✅ ' + need + '分→' + days + '天 (可兑换)'
-              : '❌ ' + need + '分→' + days + '天 (差' + Math.max(0, need - pts) + '分)';
+              ? need + '分→' + days + '天 (可兑换)'
+              : need + '分→' + days + '天 (差' + Math.max(0, need - pts) + '分)';
           })
           .join('\n');
       }

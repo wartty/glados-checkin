@@ -2,15 +2,15 @@
 
 面向 **青龙面板** 的自动签到脚本，同时支持 **GLaDOS** 与 **Railgun** 两个站点。两者后端是同一套 API，账号迁移到哪个站点就签到哪个。纯 Node.js 实现，**零第三方依赖** —— 青龙面板不需要安装任何依赖包，Node 18+ 直接跑。
 
-- ✅ 双站点支持：`glados.cloud` 与 `railgun.info`，各用自己的 Cookie 变量
-- ✅ 一份脚本：配了哪个站点的 Cookie 就签到哪个；只配一个，行为等同于单站点脚本
-- ✅ 多账号支持
-- ✅ 自动切换域名（`glados.cloud` / `glados.rocks` / `glados.network`）
-- ✅ 签到 token 按实际域名自动推导
-- ✅ 适配设备校验（`code=4` device-mismatch）
-- ✅ 积分自动兑换会员天数（可选）
-- ✅ PushPlus / Telegram 推送
-- ✅ 单账号失败不影响其他账号
+- 双站点支持：`glados.cloud` 与 `railgun.info`，各用自己的 Cookie 变量
+- 一份脚本：配了哪个站点的 Cookie 就签到哪个；只配一个，行为等同于单站点脚本
+- 多账号支持
+- 自动切换域名（`glados.cloud` / `glados.rocks` / `glados.network`）
+- 签到 token 按实际域名自动推导
+- 适配设备校验（`code=4` device-mismatch）
+- 积分自动兑换会员天数（可选）
+- PushPlus / Telegram 推送
+- 单账号失败不影响其他账号
 
 ---
 
@@ -127,7 +127,7 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 `loginDevice` 是你登录时的平台（**照它改**），`currentDevice` 是这次请求被识别成的平台；**`currentDevice` 为空**说明 UA 根本没带上。
 
-> ⚠️ 设备校验不通过时，`status` / `points` 接口**是正常的**，所以很容易误判成 Cookie 过期。
+> **注意**: 设备校验不通过时，`status` / `points` 接口**是正常的**，所以很容易误判成 Cookie 过期。
 
 ---
 
@@ -170,7 +170,7 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 >
 > `task` 是青龙执行脚本的标准写法；路径相对 `/ql/scripts`，子目录要写全。
 
-> 💡 后续如果账号**全部**迁移到 Railgun，不需要改代码：脚本会自动只签到配了 Cookie 的站点。真要清理时删掉 `GLADOS_*` 变量和 `sites.js` 里的 GLaDOS 档案即可。
+> 提示: 后续如果账号**全部**迁移到 Railgun，不需要改代码：脚本会自动只签到配了 Cookie 的站点。真要清理时删掉 `GLADOS_*` 变量和 `sites.js` 里的 GLaDOS 档案即可。
 
 ---
 
@@ -198,13 +198,13 @@ GLADOS_COOKIE="..." RAILGUN_COOKIE="..." node src/index.js --dry-run
 输出示例：
 
 ```
-🔎 只读体检模式（不会签到，不消耗当天签到）
-📋 待体检站点: GLaDOS + Railgun
-🌐 GLaDOS  | 账号数 1 | 域名 https://glados.cloud, ...
-🌐 Railgun | 账号数 1 | 域名 https://railgun.info
-🔎 [GLaDOS] 账号 1 只读体检（不签到）
-✅ [GLaDOS] 账号 1 | 积分: 412 | 天数: 29 | Cookie 有效，体检通过（本次未签到）
-📊 体检完成: Cookie 可用 1/1
+只读体检: GLaDOS + Railgun | 账号 2
+GLaDOS: 账号 1 | https://glados.cloud,... | 鉴权 Cookie | UA 默认
+Railgun: 账号 1 | https://railgun.info | 鉴权 Cookie+指纹(105字符)
+[GLaDOS 账号1] 体检通过，凭证有效（本次未签到） | 积分 412 (+12) | 剩余 29 天
+[Railgun 账号1] 体检通过，凭证有效（本次未签到） | 积分 1 | 剩余 2 天
+体检完成: 凭证可用 2/2
+体检模式不发推送；去掉 --dry-run 即为正式签到
 ```
 
 **这一步能确认什么：**
@@ -229,13 +229,14 @@ GLADOS_COOKIE="..." RAILGUN_COOKIE="..." node src/index.js --probe
 ```
 
 ```
-🍪 凭证 #1（来自 RAILGUN_COOKIE）
-   字段: koa:sess(268)  koa:sess.sig(43)
-   ❌ GLaDOS @ glados.cloud    -> code=-2  没有权限
-   ✅ Railgun @ railgun.info   -> code=0  邮箱 me@example.com  积分 412  剩余 29 天
+凭证归属探测（只读，不签到、不兑换）
+凭证 #1（来自 RAILGUN_COOKIE）字段: koa:sess(268)  koa:sess.sig(43)
+  [拒绝] GLaDOS @ glados.cloud         code=-2  没有权限
+  [通过] Railgun @ railgun.info        code=0  邮箱 me@example.com  积分 412  剩余 29 天
+说明: 凭证按站点签发，同一份在各站点表现不同属正常；[通过] 的行即账号所在站点。
 ```
 
-出现 ✅ 的那一行，就是该账号当前所在的站点。凭证是按站点签发的，同一份在 A 站通过、在 B 站被拒都属正常。
+`[通过]` 的行就是该账号当前所在的站点。凭证是按站点签发的，同一份在 A 站通过、在 B 站被拒都属正常。
 
 ---
 
@@ -313,7 +314,7 @@ RAILGUN_AUTHORIZATION=<画布哈希>-1080-1920
 
 积分不足时会静默跳过（只在日志里记一行），不会打扰你。
 
-> ⚠️ 兑换是不可逆操作，会消耗积分。建议先保持 `off` 观察几天，确认签到稳定后再开启。
+> **注意**: 兑换是不可逆操作，会消耗积分。建议先保持 `off` 观察几天，确认签到稳定后再开启。
 
 ---
 
@@ -374,8 +375,8 @@ GLaDOS 改 `GLADOS_USER_AGENT`，Railgun 改 `RAILGUN_USER_AGENT`。
 脚本会区分「刚签到成功」和「今天已经签过」，因为两者意义不同：
 
 ```
-ℹ️ 账号今日已完成签到（服务端返回「Checkin Repeats! Please Try Tomorrow」），本次不重复签到
-✅ [GLaDOS] 账号 1 | 积分: 412 | 天数: 29 | 今日已完成签到（服务端返回「...」）
+[GLaDOS 账号1] 今日已完成签到（服务端返回「Checkin Repeats! Please Try Tomorrow」） | 积分 412 (+12) | 剩余 29 天
+[Railgun 账号1] 今日已完成签到（points.checkedIn=true） | 积分 1 | 剩余 2 天
 ```
 
 判定依据也会写进结果，两个站点各自取最可靠的信号：
