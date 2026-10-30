@@ -1,6 +1,6 @@
 # GLaDOS / Railgun 自动签到
 
-面向 **青龙面板** 的自动签到脚本，同时支持 **GLaDOS** 与 **Railgun** 两个站点。两者后端是同一套 API，账号迁移到哪个站点就签到哪个。纯 Node.js 实现，**零第三方依赖** —— 青龙面板不需要安装任何依赖包，Node 18+ 直接跑。
+面向 **青龙面板** 的自动签到脚本，同时支持 **GLaDOS** 与 **Railgun** 两个站点。两者是同类服务，API 形状相同但细节有差异（返回码语义、设备标识，见下），账号迁移到哪个站点就签到哪个。纯 Node.js 实现，**零第三方依赖** —— 青龙面板不需要安装任何依赖包，Node 18+ 直接跑。
 
 - 双站点支持：`glados.cloud` 与 `railgun.info`，各用自己的 Cookie 变量
 - 一份脚本：配了哪个站点的 Cookie 就签到哪个；只配一个，行为等同于单站点脚本
@@ -30,21 +30,26 @@ please checkin via https://glados.cloud
 
 ### 关于 Railgun
 
-GLaDOS 有部分账号会被迁移到新站点 **Railgun**（<https://railgun.info>）。两个站点共用一套后端：
+GLaDOS 有部分账号会被迁移到新站点 **Railgun**（<https://railgun.info>）。两者是同类服务，API 形状相似但有差异（见下表）：
 
 | | GLaDOS | Railgun |
 | --- | --- | --- |
 | 域名 | `glados.cloud` / `glados.rocks` / `glados.network` | `railgun.info` |
 | Cookie 变量 | `GLADOS_COOKIE` | `RAILGUN_COOKIE` |
 | 会话字段 | `gld:sess` + `gld:sess.sig` | `koa:sess` + `koa:sess.sig` |
+| 设备标识 | `GLADOS_USER_AGENT`：UA 平台校验（不符返回 `code=4`） | `RAILGUN_AUTHORIZATION`：浏览器指纹（见第六节） |
 
-API 路径（`/api/user/checkin`、`/api/user/status`、`/api/user/points`、`/api/user/exchange`）与返回码完全一致，所以本脚本共用一份实现，只是按站点换域名和 Cookie。
+**会话字段的差异要留意**：GLaDOS 用 `gld:sess` + `gld:sess.sig`，Railgun 用 `koa:sess` + `koa:sess.sig`，两边字段名不同、缺一个就签不上（获取方法见第二节 1）。
+
+**设备标识则相反 —— 机制不同，但取法完全一样**：都是在浏览器请求头的同一个位置整段复制（见第二节 2），区别只在复制哪个字段。
+
+API 路径（`/api/user/checkin`、`/api/user/status`、`/api/user/points`、`/api/user/exchange`）相同，但**返回码语义不同**：Railgun 的「已签到」不用成功码表达（回 `code=3` Daily limit，需再查 `/user/points` 确认），GLaDOS 则用 `code=1` + 文案。本脚本共用一份实现，已把这些差异都处理掉。
 
 > **签到 token 恒等于当前域名**。这是站点前端自己的行为 —— `axios.post('/user/checkin', {token: location.hostname})` —— 所以脚本按实际请求的域名自动推导，**不需要配置**。
 
 ---
 
-## 二、获取 Cookie 与 User-Agent
+## 二、获取 Cookie 与设备标识
 
 ### 1. 获取 Cookie
 
@@ -57,12 +62,12 @@ API 路径（`/api/user/checkin`、`/api/user/status`、`/api/user/points`、`/a
 
 > 用 `status` 请求而不是 `checkin`：刷新页面就能拿到，**不会误触发掉当天的签到**。
 
-**必须包含会话字段，两个站点的字段名不同：**
+**必须包含会话字段，而且两个站点的字段名不同** —— GLaDOS 认 `gld:*`，Railgun 认 `koa:*`，别互换：
 
 | 站点 | 会话字段 | 说明 |
 | --- | --- | --- |
 | GLaDOS | `gld:sess` + `gld:sess.sig` | 2026-09 起启用。旧的 `koa:*` 即使没过期，调新版 API 也会返回 `没有权限`（`code=-2`） |
-| Railgun | `koa:sess` + `koa:sess.sig` | 仍是旧的命名 |
+| Railgun | `koa:sess` + `koa:sess.sig` | 沿用 `koa:*` 命名 |
 
 缺一个就签不上。好在完整 Cookie 里新老字段通常是**同时下发**的，所以**整段复制即可，不要手工挑字段**。
 
@@ -75,9 +80,26 @@ gld:sess=eyJ1c2VySWQiOjEyMzQ1Njc4OTB9; gld:sess.sig=abcdef123456; koa:sess=...; 
 > **格式要点**：分号后**必须有一个空格**，值两边**不要加引号**。
 > 多余字段（`theme`、`_ga` 之类）不影响使用。脚本也做了较强容错（支持 JSON、裸 JWT、`Cookie:` 前缀等），但保持标准格式最稳妥。
 
-### 2. 获取 User-Agent（重要）
+### 2. 获取设备标识（两个站点机制不同，取法一样）
 
-站点从 2026-09 起会校验**登录设备**：服务端从 `User-Agent` 解析出平台，与登录时的平台比对，不一致就返回 `code=4`（`Automated check-in detected`）。两个站点行为一致。
+两个站点都需要给脚本一个**设备标识**，**取法完全相同** —— 就是一次「从浏览器请求头整段复制」，不用装插件、不用点签到按钮：
+
+1. 用你**平时登录该站点**的那个浏览器打开站点并登录
+2. `F12` 打开开发者工具，切到 **Network**
+3. **刷新页面**（`F5`）
+4. 点开任意一个 **`/api/user/...`** 请求（如 `status`）
+5. 在 **Request Headers** 里找到下表中的字段，**整段复制**，粘到对应变量
+
+| 站点 | 复制这个头 | 填到该变量 | 它是什么 |
+| --- | --- | --- | --- |
+| GLaDOS | `User-Agent` | `GLADOS_USER_AGENT` | 浏览器 UA 字符串 |
+| Railgun | `Authorization` | `RAILGUN_AUTHORIZATION` | 浏览器指纹，形如 `<画布哈希>-1080-1920` |
+
+> **取法一样，机制不同**：GLaDOS 从 UA 里解析出**平台**来比对；Railgun 把 `Authorization` 当作设备凭据整体比对。所以下面两者的注意事项不一样。
+
+#### GLaDOS：UA 平台校验
+
+GLaDOS 从 2026-09 起会校验**登录设备**：服务端从 `User-Agent` 解析出平台，与登录时的平台比对，不一致就返回 `code=4`（`Automated check-in detected`）。
 
 **关键：只比对「平台」，不比对完整字符串。** 平台只有这几种取值：
 
@@ -87,32 +109,29 @@ Windows / macOS / Linux / Android / iOS / Bot / Other
 
 所以 Chrome 版本号、小版本差异都**不影响** —— 只有平台必须对上。
 
-**怎么拿**（任选一种）：
+**如果不想翻请求头**，UA 也可以这样拿（三者等价，任选）：
 
 - **最简单**：用你**平时登录该站点的那个浏览器**打开它，按 `F12` → **Console**，输入 `navigator.userAgent` 回车，复制输出的完整字符串
 - 地址栏输入 `chrome://version`，复制「用户代理」那一整行
-- 在 `status` 请求的 Request Headers 里复制 `User-Agent`
+- 在 `status` 请求的 Request Headers 里复制 `User-Agent`（即上面的统一取法）
 
-> 想确认自己登录用的是哪个平台：登录状态下访问 `<站点>/api/user/sessions`，看 `device` 字段。
+> 想确认 **GLaDOS** 登录用的是哪个平台：登录状态下访问 `<站点>/api/user/sessions`，看 `device` 字段。
 
-**要不要配？**
+**GLaDOS 的 UA 要不要配？**
 
-| 站点 | 是否需要配置 |
-| --- | --- |
-| GLaDOS | **非 Windows 登录必须配**（`GLADOS_USER_AGENT`），否则会被判为自动签到 |
-| Railgun | **不需要** —— 它的设备标识是 `RAILGUN_AUTHORIZATION` 指纹，与 UA 无关 |
-
-| 你的登录环境（GLaDOS） | 是否需要配置 |
+| 你的登录环境 | 是否需要配置 |
 | --- | --- |
 | Windows 电脑的 Chrome / Edge | **不用配**，脚本默认值就是 Windows Chrome |
-| macOS / Linux / 手机 / iPad | **必须配**，否则会被判为自动签到 |
+| macOS / Linux / 手机 / iPad | **必须配**（`GLADOS_USER_AGENT`），否则会被判为自动签到 |
 
-**怎么填** —— 变量名按站点选，GLaDOS 用 `GLADOS_USER_AGENT`，Railgun 用 `RAILGUN_USER_AGENT`（后者通常不需要）：
+> **Railgun 不用配 UA** —— 它靠 `RAILGUN_AUTHORIZATION` 指纹识别设备。取法见本节开头的统一说明，指纹本身的细节在第六节。
+
+**怎么填** —— 值**直接粘贴**，两种场景的注意点不同：
 
 | 场景 | 写法 |
 | --- | --- |
-| 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`（或 `RAILGUN_USER_AGENT`），值**直接粘贴**（输入框里不用加引号） |
-| shell 临时运行 | **必须加引号**，否则会被 shell 截断 |
+| 青龙面板 | 环境变量 → 新建 → 名称 `GLADOS_USER_AGENT`，值**直接粘贴**（输入框里不用加引号） |
+| shell 临时运行 | **必须加引号**，否则 UA 里的空格会被 shell 截断 |
 
 ```bash
 # shell 临时运行
@@ -139,10 +158,13 @@ GLADOS_USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...' node src/index
 
 | 变量名 | 值 | 必填 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | glados.cloud 的完整 Cookie（须含 `gld:sess`） | 有 GLaDOS 账号时 |
-| `RAILGUN_COOKIE` | railgun.info 的完整 Cookie（须含 `koa:sess`） | 有 Railgun 账号时 |
-| `GLADOS_USER_AGENT` | 登录 glados 浏览器的 User-Agent（见第二节 2） | 非 Windows 登录时必填 |
-| `RAILGUN_USER_AGENT` | 登录 railgun 浏览器的 User-Agent | 不需要（Railgun 用指纹识别设备） |
+| `GLADOS_COOKIE` | glados.cloud 的完整 Cookie（须含 `gld:sess` + `gld:sess.sig`） | 有 GLaDOS 账号时 |
+| `RAILGUN_COOKIE` | railgun.info 的完整 Cookie（须含 `koa:sess` + `koa:sess.sig`） | 有 Railgun 账号时 |
+| `GLADOS_USER_AGENT` | GLaDOS 设备标识：登录浏览器的 UA（见第二节 2） | 非 Windows 登录时必填 |
+| `RAILGUN_AUTHORIZATION` | Railgun 设备标识：`Authorization` 指纹（见第二节 2） | **有 Railgun 账号时必填** |
+| `RAILGUN_USER_AGENT` | — | 否（Railgun 不做 UA 校验） |
+
+> 后两项是**设备标识**，两个站点取法一样、只是复制的字段不同 —— 都在第二节 2 讲过。
 
 两个都配就一次跑完两个站点；只配一个就是单站点。
 
@@ -266,7 +288,7 @@ task glados-checkin/src/index.js --dry-run
 | `XXX_USER_AGENT` | Windows Chrome UA | 该浏览器 UA。GLaDOS 用它做设备校验；Railgun 不需要。也认 `XXX_UA` |
 | `XXX_DOMAINS` | GLaDOS: `glados.cloud,glados.rocks,glados.network`<br>Railgun: `railgun.info` | 候选域名，逗号分隔，按顺序尝试 |
 | `XXX_CHECKIN_TOKEN` | 按域名自动推导 | 正常不用配，仅官方再次改 API 时才需要覆盖 |
-| `XXX_AUTHORIZATION` | — | 设备指纹，放在 `Authorization` 头里（**不是令牌**）。Railgun 建议配，见下 |
+| `XXX_AUTHORIZATION` | — | 设备指纹，放在 `Authorization` 头里（**不是令牌**）。Railgun 必须配，见下 |
 | `XXX_EXCHANGE_PLAN` | 回落 `EXCHANGE_PLAN` | 该站点的自动兑换档位，见下 |
 
 ### Railgun 的设备指纹（`RAILGUN_AUTHORIZATION`）
@@ -279,11 +301,13 @@ Ta = getCanvasFingerprint() + "-" + screen.height + "-" + screen.width
 
 形如 `<画布哈希>-1080-1920`。服务端很可能把会话与这个指纹绑定 —— **只带 Cookie 不带指纹时，请求看起来像「另一台设备」**，可能因此被判为无权限（`code=-2`）。
 
-好消息：它**长期有效**（同一浏览器基本不变），不像会话那样会过期。从浏览器任意一个 `/api/user/...` 请求的 Request Headers 里复制即可，**不需要点签到按钮**：
+**取法和 GLaDOS 的 UA 完全一样** —— 第二节 2 的那 5 步照做，只是要复制的字段换成 `Authorization`：
 
 ```bash
 RAILGUN_AUTHORIZATION=<画布哈希>-1080-1920
 ```
+
+好消息：它**长期有效**（同一浏览器基本不变），不像会话那样会过期。
 
 ### 全局
 
@@ -350,9 +374,8 @@ RAILGUN_AUTHORIZATION=<画布哈希>-1080-1920
 签到 token 失效了，站点又改了 API 值。把 `GLADOS_CHECKIN_TOKEN` 设成日志里提示的那个域名即可。
 
 **Q：日志显示 `设备校验失败 (device-mismatch)`？**
-这是 2026-09 新增的设备校验。脚本会同时打印服务端返回的 `loginDevice`（登录平台）与 `currentDevice`（本次请求被识别成的平台）。
-把对应站点的 UA 变量改成 `loginDevice` 对应的平台即可 —— **只比对平台，版本号无所谓**：
-GLaDOS 改 `GLADOS_USER_AGENT`，Railgun 改 `RAILGUN_USER_AGENT`。
+这是 GLaDOS 2026-09 起的设备校验（Railgun 无此机制）。脚本会同时打印服务端返回的 `loginDevice`（登录平台）与 `currentDevice`（本次请求被识别成的平台）。
+把 `GLADOS_USER_AGENT` 改成 `loginDevice` 对应的平台即可 —— **只比对平台，版本号无所谓**。
 注意此时 `status` / `points` 接口是正常的，别误以为是 Cookie 问题。详见第二节 2。
 
 **Q：`Cookie 失效或无权限 (code=-2)`？**
