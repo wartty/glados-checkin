@@ -24,13 +24,14 @@ function sleep(ms) {
 
 /**
  * 是否为「重试也没用」的确定性失败：
- *   code=4  设备校验不通过（UA 平台 / 指纹与登录时不一致）
- *   code=-2 凭证失效或无权限
- * 这类问题重试只会白等，还会增加被限流的风险。
+ *   code=4            设备校验不通过（UA 平台 / 指纹与登录时不一致）
+ *   code=-2           凭证失效或无权限
+ *   reason=turnstile  被 Turnstile 人机验证拦截（重试会再被拦，白等）
  */
 function isDeterministicFailure(data) {
   if (!data) return false;
-  return data.code === CODE.DEVICE_MISMATCH || data.code === CODE.NO_PERMISSION;
+  if (data.code === CODE.DEVICE_MISMATCH || data.code === CODE.NO_PERMISSION) return true;
+  return data.reason === 'turnstile';
 }
 
 /**
@@ -110,7 +111,17 @@ function describeResult(result, site) {
   const message = String(data.message || '无返回信息');
 
   if (isSuccessfulCheckin(data)) {
-    return { message: '签到成功 — ' + message, success: true };
+    let extra = '';
+    // 2026-11 起免费账号（无购买历史）签到积分有上限，响应带 breakdown 说明扣减
+    const breakdown = data.breakdown;
+    if (breakdown && Number(breakdown.freeCap) > 0) {
+      extra =
+        '（免费账号本次获得 ' + Math.round(Number(breakdown.points) || 0) +
+        ' 分，上限 ' + Math.round(Number(breakdown.freeCap) || 0) +
+        ' 分，原本可得 ' + Math.round(Number(breakdown.freeBefore) || 0) +
+        ' 分；付费可解除上限）';
+    }
+    return { message: '签到成功 — ' + message + extra, success: true };
   }
 
   if (data.code === CODE.DEVICE_MISMATCH) {
@@ -130,6 +141,16 @@ function describeResult(result, site) {
 
   if (data.code === CODE.NO_PERMISSION) {
     return { message: '凭证失效或无权限，请重新获取 (code=-2)', success: false };
+  }
+
+  // 服务端用 reason:turnstile 显式表示被人机验证拦截（2026-11 起）
+  if (data.reason === 'turnstile') {
+    return {
+      message:
+        '被 Turnstile 人机验证拦截 —— 站点风控要求浏览器环境验证，无头脚本无法完成。' +
+        '请用浏览器手动签到；也可在家里（与浏览器同一网络）跑 --dry-run 对比，确认是否为服务器 IP 触发',
+      success: false,
+    };
   }
 
   if (isTokenOutdated(data)) {
@@ -245,6 +266,7 @@ async function processAccount(cookie, index, config, log, options) {
     timeoutMs: config.timeoutMs,
     logger: plog,
     debug: opts.debug,
+    useChallenge: Boolean(config.site.challenge),
   });
 
   let checkinResult = null;
@@ -269,6 +291,23 @@ async function processAccount(cookie, index, config, log, options) {
           message: '体检失败：该站点拒绝此凭证 (code=-2)，可能已失效或账号不在 ' + site.label,
           success: false,
         };
+
+    // 挑战状态是只读探测：看站点今天是否要求 Turnstile 人机验证。
+    // 同时回显服务端看到的出口 IP —— 用来核对脚本与浏览器的网络路径是否一致
+    //（同一局域网下若 IP 仍不同，多半是一边走 IPv6 一边走 IPv4）。
+    if (site.challenge && described.success) {
+      const challenge = await client.fetchChallenge();
+      if (challenge.ok) {
+        const ipNote = challenge.ip ? '（出口 IP: ' + challenge.ip + '）' : '';
+        plog(
+          challenge.turnstile
+            ? '挑战: 今天要求 Turnstile 人机验证 —— 脚本无法自动签到，需浏览器手动签' + ipNote
+            : '挑战: 今天无需人机验证 —— 脚本可以自动签到' + ipNote
+        );
+      } else {
+        plog('挑战: 未取得（' + challenge.error + '）');
+      }
+    }
   } else if (already) {
     // 签到没成功码，但确认今天已完成 —— 不是失败，也不是又签了一次
     described = {

@@ -3,7 +3,16 @@
 /**
  * GLaDOS / Railgun 共用的 API 客户端。
  *
- * 两个站点协议完全一致，只有域名不同，所以共用这一份实现。
+ * 两个站点 API 路径相同，但细节有差异，通过站点档案（sites.js）区分：
+ *   - GLaDOS 2026-11 起签到多了一步挑战（challenge）：
+ *       1. GET /user/checkin/challenge -> {nonce, ttl, turnstile}
+ *       2. proof = SHA-256(nonce + '.' + PROOF_SUFFIX) 的 hex
+ *       3. POST /user/checkin {token, nonce, proof, tsState}
+ *       前端还强制「取挑战到提交 ≥2500ms」，照做以免被拒。
+ *       若挑战响应带 turnstile（Cloudflare 人机验证），无头脚本无法求解，
+ *       按前端超时路径以 tsState:'timeout' 提交，失败时日志会说明。
+ *       挑战接口不可用时回退旧协议（只发 token），与前端行为一致。
+ *   - Railgun 保持旧协议：只发 token。
  *
  * 零依赖：直接用 Node 内置的 fetch（Node 18+），青龙面板无需安装任何依赖。
  * 关键约束：
@@ -14,7 +23,56 @@
  *   - 兑换接口要求表单提交，发 JSON 会被拒
  */
 
+const crypto = require('node:crypto');
 const { EXCHANGE_PLANS } = require('./config');
+
+/** 签到 proof 的固定后缀，取自 GLaDOS 前端 checkinProof 模块。 */
+const PROOF_SUFFIX = 'glados-observe-v1';
+
+/** 前端强制：取挑战到提交签到之间的最小间隔（毫秒）。 */
+const CHALLENGE_MIN_DELAY_MS = 2500;
+
+/**
+ * 计算签到 proof：SHA-256(nonce + '.' + PROOF_SUFFIX) 的小写 hex。
+ * 与 GLaDOS 前端 checkinProof 的实现逐字对齐；
+ * nonce 为空时返回空串（前端在 crypto 不可用时也是发空串）。
+ */
+function checkinProof(nonce) {
+  if (!nonce) return '';
+  return crypto
+    .createHash('sha256')
+    .update(String(nonce) + '.' + PROOF_SUFFIX)
+    .digest('hex');
+}
+
+/**
+ * 从 UA 推导 sec-ch-ua 系列头，让请求更像浏览器 XHR。
+ * 非 Chrome UA 时不发 sec-ch-ua（避免与 UA 自相矛盾）。
+ */
+function browserHintHeaders(userAgent) {
+  const ua = String(userAgent || '');
+  const headers = {
+    'sec-ch-ua-mobile': /Android|iPhone|iPad|Mobile/i.test(ua) ? '?1' : '?0',
+  };
+
+  const platform = /Android/i.test(ua)
+    ? '"Android"'
+    : /iPhone|iPad|iOS/i.test(ua)
+      ? '"iOS"'
+      : /Macintosh/i.test(ua)
+        ? '"macOS"'
+        : /Linux/i.test(ua)
+          ? '"Linux"'
+          : '"Windows"';
+  headers['sec-ch-ua-platform'] = platform;
+
+  const chromeVersion = ua.match(/Chrome\/(\d+)/);
+  if (chromeVersion) {
+    const v = chromeVersion[1];
+    headers['sec-ch-ua'] = '"Chromium";v="' + v + '", "Google Chrome";v="' + v + '"';
+  }
+  return headers;
+}
 
 /**
  * 服务端返回码语义。
@@ -53,9 +111,16 @@ const REPEAT_MARKERS = [
   'please try tomorrow',
 ];
 
-/** 文案是否表明「今天已经签过了」。 */
+/**
+ * 响应是否表明「今天已经签过了」。
+ *
+ * 两个信号，命中任一即可：
+ *   - 服务端文案（GLaDOS 的 Checkin Repeats）
+ *   - 显式 repeated 标志（2026-11 起签到响应新增，code=0 时也可能为 true）
+ */
 function isRepeatByMessage(payload) {
   if (!payload || typeof payload !== 'object') return false;
+  if (payload.repeated === true) return true;
   const message = String(payload.message || '').toLowerCase();
   return REPEAT_MARKERS.some((marker) => message.includes(marker));
 }
@@ -130,6 +195,8 @@ class CheckinClient {
    * @param {number} options.timeoutMs
    * @param {(msg: string) => void} [options.logger]
    * @param {boolean} [options.debug] 打印每次请求的原始响应，用于排查
+   * @param {boolean} [options.useChallenge] 签到前先取挑战（GLaDOS 2026-11 起需要）
+   * @param {number} [options.challengeMinDelayMs] 取挑战到提交的最小间隔，测试可调小
    */
   constructor(options) {
     this.cookie = options.cookie;
@@ -141,6 +208,9 @@ class CheckinClient {
     this.debug = Boolean(options.debug);
     /** 自定义 Authorization 头值；留空则只用 Cookie 鉴权。 */
     this.authorization = options.authorization || '';
+    /** 是否走挑战流程（GLaDOS 需要，Railgun 不需要）。 */
+    this.useChallenge = Boolean(options.useChallenge);
+    this.challengeMinDelayMs = options.challengeMinDelayMs || CHALLENGE_MIN_DELAY_MS;
 
     /** 首次成功后记住可用域名，后续请求少走弯路。 */
     this.activeDomain = null;
@@ -209,7 +279,14 @@ class CheckinClient {
       Referer: domain + '/console/checkin',
       'Cache-Control': 'no-cache',
       Pragma: 'no-cache',
+      // 浏览器 XHR 会自动带的头；带上以贴近站点前端的请求形状
+      // （2026-11 风控升级后，头指纹可能是 Turnstile 触发因子之一）
+      'sec-fetch-site': 'same-origin',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-dest': 'empty',
     };
+    const hints = browserHintHeaders(this.userAgent);
+    Object.assign(headers, hints);
     // 令牌鉴权的站点可能没有 Cookie，此时不要发空的 Cookie 头
     if (this.cookie) {
       headers.Cookie = this.cookie;
@@ -303,10 +380,81 @@ class CheckinClient {
     return { ok: false, status: 0, data: null, domain: '', error: lastError };
   }
 
-  /** 执行签到。token 按实际域名推导。 */
+  /**
+   * 取签到挑战（GLaDOS 2026-11 起的流程第一步）。
+   *
+   * @returns {Promise<{ok: boolean, nonce?: string, ttl?: number, turnstile?: any, ip?: string, error?: string}>}
+   *   ip 是服务端看到的出口 IP（前端也会展示），可用于核对脚本与浏览器的网络路径是否一致
+   */
+  async fetchChallenge() {
+    const result = await this.request('GET', '/api/user/checkin/challenge');
+    if (!result.ok) {
+      return { ok: false, error: result.error || '网络异常' };
+    }
+    const data = result.data || {};
+    if (data.code !== CODE.SUCCESS || !data.nonce) {
+      return { ok: false, error: 'code=' + (data.code === undefined ? '?' : data.code) };
+    }
+    return {
+      ok: true,
+      nonce: String(data.nonce),
+      ttl: Number(data.ttl) || 300000,
+      turnstile: data.turnstile || null,
+      ip: data.ip ? String(data.ip) : '',
+    };
+  }
+
+  /**
+   * 构造签到的挑战字段。
+   *
+   * 与前端 solveChallenge 对齐：
+   *   - 挑战不可用 → 返回 {}（前端此时也只发 token）
+   *   - 正常路径 → {nonce, proof, tsState:'off'}（turnstile 为空时）
+   *   - 要求 Turnstile → 无头环境解不了，按前端超时路径发 tsState:'timeout'
+   *   - 取挑战到提交不足 2500ms 时补足等待（前端强制的人机时序）
+   *
+   * @returns {Promise<object>} 追加到签到 body 上的字段
+   */
+  async solveChallenge() {
+    if (!this.useChallenge) return {};
+
+    const startedAt = Date.now();
+    const challenge = await this.fetchChallenge();
+    if (!challenge.ok) {
+      this.logger('未取得签到挑战（' + challenge.error + '），按旧协议仅提交 token');
+      return {};
+    }
+
+    // 站点下发了 Turnstile：无头脚本解不了。前端等 30s 超时后以
+    // tsState:'timeout' 提交，这里直接采用同样的结果，不空等 30 秒。
+    if (challenge.turnstile) {
+      this.logger('签到挑战要求 Turnstile 人机验证，脚本无法求解，将按超时路径提交');
+      await this.waitMinDelay(startedAt);
+      return { nonce: challenge.nonce, proof: checkinProof(challenge.nonce), tsState: 'timeout' };
+    }
+
+    await this.waitMinDelay(startedAt);
+    return {
+      nonce: challenge.nonce,
+      proof: checkinProof(challenge.nonce),
+      tsState: 'off',
+    };
+  }
+
+  /** 距 startedAt 不足 challengeMinDelayMs 时补足等待。 */
+  async waitMinDelay(startedAt) {
+    const remaining = this.challengeMinDelayMs - (Date.now() - startedAt);
+    if (remaining > 0) {
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+
+  /** 执行签到。token 按实际域名推导；GLaDOS 还会附加挑战字段。 */
   async checkin() {
+    const challengeFields = await this.solveChallenge();
     return this.request('POST', '/api/user/checkin', {
-      jsonForDomain: (domain) => ({ token: this.tokenFor(domain) }),
+      jsonForDomain: (domain) =>
+        Object.assign({ token: this.tokenFor(domain) }, challengeFields),
     });
   }
 
@@ -408,9 +556,12 @@ module.exports = {
   SUCCESS_MARKERS,
   REPEAT_MARKERS,
   UNKNOWN,
+  PROOF_SUFFIX,
   hostnameOf,
   todayString,
   extractCheckedDates,
+  checkinProof,
+  browserHintHeaders,
   CheckinClient,
   isSuccessfulCheckin,
   isRepeatByMessage,

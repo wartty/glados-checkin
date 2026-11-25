@@ -3,13 +3,14 @@
 /**
  * 站点档案。
  *
- * GLaDOS 与 Railgun 是同一套 API 的两个站点，协议完全一致：
- *   POST /api/user/checkin   {token: <当前域名>}
+ * GLaDOS 与 Railgun 是同类服务，API 路径相同但细节有差异：
+ *   POST /api/user/checkin   {token: <当前域名>, ...挑战字段（仅 GLaDOS）}
  *   GET  /api/user/status
  *   GET  /api/user/points
  *   POST /api/user/exchange  （表单）
  *
- * 差别只有域名、Cookie 的环境变量名，以及会话字段的名字。
+ * 差异集中在：域名、Cookie 的环境变量名、会话字段名、设备标识，
+ * 以及 GLaDOS 2026-11 起的签到挑战（challenge: true）。
  * 因此签到逻辑共用一份，这里只描述「每个站点长什么样」。
  *
  * 关于 token：站点前端自己发的是 axios.post('/user/checkin', {token: location.hostname})，
@@ -48,6 +49,12 @@ const SITES = [
     sessionFields: ['gld:sess'],
     sessionHint: 'GLaDOS 2026-09 起改用 gld:sess + gld:sess.sig，只有旧的 koa:sess 会返回「没有权限」',
     sessionHowTo: '请在签到页 Network 里，从 status 请求的 Request Headers 中【整段复制】Cookie',
+    /**
+     * 2026-11 起签到需要挑战（challenge）：
+     * 先 GET /user/checkin/challenge 拿 nonce，proof = SHA-256(nonce + '.glados-observe-v1')，
+     * 再 POST {token, nonce, proof, tsState}。见 client.js solveChallenge。
+     */
+    challenge: true,
   },
   {
     key: 'railgun',
@@ -87,6 +94,8 @@ const SITES = [
      * 而是会话被当成别的设备 —— 单独提示一下，避免误解。
      */
     authNote: '设备指纹（非令牌），从浏览器请求头原样复制，长期有效',
+    /** Railgun 未引入签到挑战，保持旧协议（只发 token）。 */
+    challenge: false,
   },
 ];
 
